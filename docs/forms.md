@@ -23,11 +23,6 @@ why there are so few.
 | `prod-ssh` | `prod` | sshd, for people who log in |
 | `bastion` | `prod` | forwarding-only SSH, with explicit destinations ([bastion.md](bastion.md)) |
 | `tailscale` | `prod` | userspace subnet routing ([tailscale.md](tailscale.md)) |
-| `caddy` | `prod` | a web server that gets its own certificates ([caddy.md](caddy.md)) |
-| `valkey` | `prod` | Valkey 9.1 on a UNIX socket, for the application beside it ([valkey.md](valkey.md)) |
-| `openbao` | `prod` | OpenBao, unsealed by a key from the config and set up by itself ([openbao.md](openbao.md)) |
-| `step-ca` | `prod` | an internal certificate authority, ACME for the names the config allows ([step-ca.md](step-ca.md)) |
-| `wordpress` | `php` | WordPress on SQLite, installed from the config before it serves ([wordpress.md](wordpress.md)) |
 | `sshd`, `qemu-host` | `minimal` | sshd with a shell; and a host for virtual machines |
 | `lima` | `prod` | the Lima test vehicle (`make lima`) |
 
@@ -88,11 +83,8 @@ The service cannot read the rest of `/run/config`.
 
 Sources must be beneath `/run/config`; destinations are plain names, not
 paths. A service may name up to 32 files, each at most 64 KiB. Missing or
-unreadable files keep it down, unless the line ends in `optional`: then a
-missing file leaves no copy, and the service runs without it (a mail
-relay's password, where the machine sends no mail). Contents are copied
-unchanged, never logged, and refreshed on each start, before any `before`
-command. Leash reads them
+unreadable files keep it down. Contents are copied unchanged, never logged,
+and refreshed on each start, before any `before` command. Leash reads them
 as root but writes the copies only after dropping privileges and entering
 Landlock. Existing destination links are replaced, not followed.
 
@@ -124,8 +116,7 @@ At each start, leash copies it into the service's directory and runs
 `service-config` as the service, which checks every value against its
 declared type and writes `/run/svc/SERVICE/FILE`: `KEY=VALUE` lines
 (`env`, which leash adds to the service's environment), one JSON object
-(`json`, with `from PATH` merging into a file from the image; a key with
-dots, `authority.policy.x509.allow.dns`, fills a key the daemon nests), or
+(`json`, with `from PATH` merging into a file from the image), or
 `KEY VALUE...` lines (`conf`). A list (`TYPE...`) holds up to 32 values.
 The types are `ip`, `cidr`, `addrport`, `hostport`, `hostname`, `port`,
 `url`, `int`, `bool` and `string`.

@@ -2,8 +2,7 @@
 #
 # Build
 #   make install-deps    install apko, Zig, QEMU, erofs-utils and the rest, after
-#                        asking: macOS, Debian, Ubuntu, Fedora, Arch; FreeBSD and
-#                        NetBSD, experimental, with gmake (tools/install-deps)
+#                        asking: macOS, Debian, Ubuntu, Fedora, Arch, FreeBSD
 #   make                 the image: build/<arch>/vmlinuz, build/<arch>/<form>/initramfs.zst
 #   make slot            build/<arch>/<form>/slot/: vmlinuz, stage0, root.erofs, for bite
 #   make disk            build/<arch>/<form>/disk.img: a UEFI boot disk of the slot;
@@ -479,10 +478,10 @@ endef
 # boots, as "update-policy", and lib/network.zig, a config tar's static
 # network, as "network", compiled with them, as ReleaseSafe as it is.
 ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep seal --dep settings \
-	--dep update-policy --dep network --dep hostkey -Mroot=$(1) \
+	--dep update-policy --dep network -Mroot=$(1) \
 	-Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig -Mverity=lib/verity.zig \
 	-Mseal=lib/seal.zig -Msettings=lib/settings.zig -Mupdate-policy=lib/update-policy.zig \
-	-Mnetwork=lib/network.zig -Mhostkey=lib/hostkey.zig
+	-Mnetwork=lib/network.zig
 
 define zig_build
 $(zig_check)
@@ -515,7 +514,6 @@ test:
 	zig test lib/settings.zig
 	zig test lib/update-policy.zig
 	zig test lib/network.zig
-	zig test lib/hostkey.zig
 	zig test boot/gpt.zig
 	zig test tools/cve-tiers.zig
 	zig test tools/kernel-config-check.zig
@@ -638,11 +636,7 @@ werewolf: $(WEREWOLF)
 $(WEREWOLF): cmd/werewolf/werewolf.zig $(wildcard cmd/werewolf/*.zig) lib/settings.zig lib/update-policy.zig \
 	lib/network.zig
 	$(zig_check)
-	@# Beside it, then renamed over it: a build while werewolf runs (a
-	@# check rebuilds it) never leaves an empty file, which a shell would run
-	@# as an empty script, exiting 0 having done nothing.
-	zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$@.tmp
-	mv -f $@.tmp $@
+	zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$@
 
 disk: $(DISK)
 
@@ -991,7 +985,7 @@ check-%: | $(CHECK_SHARED)
 	@$(CHECK_MAKE) FORM=$* _check-form
 
 _check-form: $(WEREWOLF)
-	@rm -f $(CHECK)/$(FORM).img && dd if=/dev/zero of=$(CHECK)/$(FORM).img bs=1048576 count=0 seek=1024 2>/dev/null
+	@rm -f $(CHECK)/$(FORM).img && dd if=/dev/zero of=$(CHECK)/$(FORM).img bs=1048576 count=0 seek=1024 status=none
 	@rm -rf $(CHECK)/$(FORM)-config && mkdir -p $(CHECK)/$(FORM)-config && \
 		head -c 64 /dev/zero | tr '\0' k >$(CHECK)/$(FORM)-config/data.key && \
 		$(if $(CHECK_SSH),rm -f $(CHECK)/$(FORM)-key $(CHECK)/$(FORM)-key.pub && \
@@ -1001,7 +995,6 @@ _check-form: $(WEREWOLF)
 			cp $(CHECK)/$(FORM)-key.pub $(CHECK)/$(FORM)-config/bastion/authorized_keys &&) \
 		$(if $(filter tailscale,$(FORM)),mkdir -p $(CHECK)/$(FORM)-config/tailscale && \
 			printf '%s\n' tskey-auth-offline-test >$(CHECK)/$(FORM)-config/tailscale/auth_key &&) \
-		$(if $(wildcard test/config-$(FORM)),test/config-$(FORM) $(CHECK)/$(FORM)-config &&) \
 		$(WEREWOLF) pack $(FORM) -o $(CHECK)/$(FORM)-config.tar --config $(CHECK)/$(FORM)-config >/dev/null
 	@awk '$(if $(filter tailscale,$(FORM)),$$2 != "listeners",1)' test/checks $(wildcard test/checks-$(FORM)) >$(CHECK)/$(FORM)-checks
 	@SSH_MODE=$(FORM) SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key test/boot $(FORM) $(CHECK)/$(FORM)-checks $(CHECK)/$(FORM).log $(CHECK_FORM_QEMU)

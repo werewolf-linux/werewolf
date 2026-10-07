@@ -13,8 +13,7 @@ On a machine without a shell, runsv can only run `./run`, with no
 arguments, as root. werewolf's own programs give root up themselves; a
 program someone else wrote cannot. Its service file says, one directive a
 line, what it may do: `exec`, `user`, `listen` and `connect` ports, `read`,
-`write` and `run` paths, `pledge` promises, `env`, `secret`, `config`
-(a file copied in, or `optional` and skipped when the machine lacks it),
+`write` and `run` paths, `pledge` promises, `env`, `secret`, `config`,
 `setting` and `render`, `memory`, `nofile`, `requires`, `before`.
 
 ## Goals
