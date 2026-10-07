@@ -88,7 +88,8 @@ pub fn forwards(gpa: Allocator, name: []const u8, ports: []const u16) ![]const F
 /// bhyve's standard output, which the supervisor's log keeps; and the UEFI
 /// firmware, which boots the disk. Linux wants -w, since it reads MSRs
 /// bhyve does not have; -H yields the host's CPU when the guest idles; -u
-/// keeps the clock in UTC.
+/// keeps the clock in UTC. No -A: FreeBSD 15 always makes ACPI tables and
+/// dropped the flag.
 pub fn argv(
     gpa: Allocator,
     name: []const u8,
@@ -105,7 +106,6 @@ pub fn argv(
     );
     return try gpa.dupe([]const u8, &.{
         "bhyve",
-        "-A",
         "-H",
         "-w",
         "-u",
@@ -215,11 +215,11 @@ test argv {
     try testing.expectEqualStrings("edge", a[a.len - 1]);
     try testing.expectEqualStrings(
         "2,virtio-net,slirp,hostfwd=tcp:127.0.0.1:23400-:22;tcp:127.0.0.1:23401-:443",
-        a[14],
+        a[13],
     );
-    try testing.expectEqualStrings("4,virtio-blk,/m/config.tar,ro", a[18]);
+    try testing.expectEqualStrings("4,virtio-blk,/m/config.tar,ro", a[17]);
     const none = try argv(gpa, "m", "/d", "/c", &.{});
-    try testing.expectEqualStrings("2,virtio-net,slirp", none[14]);
+    try testing.expectEqualStrings("2,virtio-net,slirp", none[13]);
     const d = try destroy(gpa, "edge");
     try testing.expectEqualStrings("--vm=edge", d[1]);
 }

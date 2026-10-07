@@ -9,6 +9,7 @@ audit "file" "stdout" {
   description = "every request, on the console"
   options {
     file_path = "stdout"
+    log_raw = "true"
   }
 }
 
