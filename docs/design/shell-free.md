@@ -213,15 +213,14 @@ seccomp filter on top of the machine seal.
 `./service`, and then:
 
 1. **As root**: checks `requires`, reads `secret` and `config`; makes the service's
-   directories and hands them to its user; sets limits, priority, OOM score
-   and its cgroup.
+   directories and hands them to its user; sets limits and its cgroup.
 2. **Gives up root**: supplementary groups, gid and uid, keeping only
    `CAP_NET_BIND_SERVICE` if a port needs it.
 3. **Seals itself**: `no_new_privs`; a Landlock ruleset of the floor, the
-   paths, the ports and the programs; Landlock scoping; and the service's
-   seccomp filter, as in lockdown.md.
+   paths, the ports and the programs; and Landlock scoping.
 4. **Copies the named config files**, then runs each `before` and waits for it.
-5. **Execs `exec`**, with only the environment the file names.
+5. **Installs the service's seccomp filter and execs `exec`**, with only the
+   environment the file names. The machine seal also covers `before` commands.
 
 It logs one line saying what it applied. When a requirement is missing or a
 `before` fails, it logs why, writes `d` to `supervise/control` and exits:
@@ -328,7 +327,8 @@ that holds no files once it sleeps.
   console.
 - **`DEV=1`** builds the same chain with a development layer on top:
   `busybox-full`, `strace`, and a root shell on the console. The posture
-  line says `"dev":true`, and CI refuses to publish one. As with
+  line says `"dev":true`, and `make dist`, which CI publishes from,
+  refuses one. As with
   Chainguard's `-dev` images, it is a different image from the one in
   production, so a fix is confirmed on the production image after.
 - **`werewolf.debug=1`** on a shell-free image has no shell to start, and

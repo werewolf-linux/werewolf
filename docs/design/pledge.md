@@ -132,6 +132,8 @@ stand alone, so a program that needs one asks for that one:
 | `landlock` | confining itself with Landlock |
 | `memfd` | anonymous memory files |
 | `ipc` | System V shared memory, semaphores and message queues |
+| `sendfile` | `sendfile`: copying a file's pages to a socket or file without reading them. werewolf's own programs make it (Zig's standard library copies files with it); a service, only if it pledges it: nginx does |
+| `splice` | `splice` and `tee`: moving pages between pipes, files and sockets. Nothing here needs them |
 | `mlock` | locking memory |
 | `settime` | setting the clock |
 | `hostname` | setting the host and domain names |
@@ -148,8 +150,23 @@ nothing here makes.
 The seal, on PID 1, allows the promises werewolf's own programs need (in
 `minimal`), and every promise any service on the machine makes, which
 the build reads from the service files. It reads system call numbers,
-never arguments, so the kernel answers every allowed call from its cache
-and the filter costs nothing more for being long.
+so the kernel answers every allowed call from its cache and the filter
+costs nothing more for being long, but for five calls it also reads
+arguments of, to refuse to everyone, root included, what no promise
+brings, the way into kernel code that exploits in CISA's KEV catalog went
+through (docs/cve-mitigation-survey.md):
+
+| Call | Refused when it asks for | Answered |
+| --- | --- | --- |
+| `socket` | a family no promise names: AF_ALG, RDS, TIPC, VSOCK, `AF_KEY`, XDP… | `EAFNOSUPPORT` |
+| `setsockopt` | `TCP_ULP` at the TCP level: kernel TLS, and every other upper-layer protocol | `ENOENT` |
+| `pipe2` | `O_NOTIFICATION_PIPE`: a watch queue | `ENOPKG` |
+| `timer_create`, `clock_nanosleep` | a CPU-time clock, its own or another process's | `EINVAL` |
+
+Each answer is the kernel's own, had it been built without the feature,
+so a program that probes for one carries on without it. These five calls
+are the only ones the kernel's cache cannot answer, and none is made
+often enough to notice.
 
 leash then gives each service a filter of its own, stacked on the seal,
 of its promises alone. That one may look at arguments, since a service
@@ -174,18 +191,27 @@ and which promise would have allowed it.
 ### When a call is refused
 
 Refused calls fail as if the kernel had no such call (ENOSYS), which
-programs expect of an older kernel and handle. `seal-watch`, which init
+programs expect of an older kernel and handle; those refused for their
+arguments, as above, as if it had no such feature. `seal-watch`, which init
 starts before the seal, hears each refusal that the seal's filter refers
 to it, says it once on the console with the promise that would allow it,
 and counts it; `seal` shows what the machine allows and what it refused:
 
 ```
 seal-watch: {"event":"refused","call":"memfd_create","promise":"memfd","pid":412}
+seal-watch: {"event":"refused","call":"socket","promise":"never","why":"socket family","arg":38,"pid":97}
 ```
 
+It hears only the programs the machine's promises alone bind, werewolf's
+own: a leashed service's filter refuses first, and the kernel takes that
+ENOSYS over the seal's listener, so those refusals fail unseen. Past 512
+calls it counts the rest together, as `other`, said once, so no flood of
+calls can hold the console.
+
 A DEV=1 build booted with `werewolf.seal=learn` allows and records every
-call instead, with the program that made it and its promise: what a new
-service needs, in the words its service file would use.
+call instead, with the program that made it, the service it runs as, and
+its promise: what a new service needs, in the words its service file would
+use.
 
 ### What it cannot tell apart
 
@@ -199,7 +225,8 @@ service needs, in the words its service file would use.
   Landlock on device files.
 - **A namespace made by `clone`.** Its flags are arguments. User
   namespaces are off for everyone (lockdown.md), and the rest need
-  `CAP_SYS_ADMIN`, which no service holds.
+  `CAP_SYS_ADMIN`, which no process holds once fence has dropped it, root
+  included.
 
 ## Order
 

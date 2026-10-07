@@ -18,7 +18,22 @@ A form declares the machine's packages, users, services and network permissions.
 Keep it with your code in version control. Building changes into a read-only
 image gives each replacement VM the same starting configuration.
 
-## Build and run
+## Run it with werewolf
+
+```sh
+make werewolf
+build/host/werewolf create example-python web --greeting "Hello from a setting"
+curl -f http://ADDRESS:8080/          # the address create printed
+build/host/werewolf delete web
+```
+
+The greeting is a setting the form declares (`etc/sv/app/service`):
+`werewolf` checks it, the machine hands it to the application as
+`GREETING`, and another `create` with a new `--greeting` changes it
+without a rebuild. Without one, the page says `Hello from Python on
+werewolf!`.
+
+## Build and run with make
 
 ```sh
 make -C examples/python image

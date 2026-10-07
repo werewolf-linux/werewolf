@@ -202,7 +202,7 @@ fails the machine unless the checks that fail are exactly those
 [test/posture-known](../test/posture-known) gives the form and the
 architecture: a new failure fails, and so
 does a known one that starts passing, until it leaves the list and the
-docs say so. A new protection belongs in cmd/posture/posture.zig.
+docs say so. A new protection belongs in cmd/posture, in the file for its area.
 
 A form that serves ssh is also logged into from the host, as an operator
 would, through a forwarded port: root's key from the config gets in, a
@@ -253,16 +253,46 @@ BOOT_TIMEOUT=20 make check-minimal          # see a hang sooner
 
 `check-one` keeps each failing boot's console as `FORM-one-N.log`.
 
+## Where a boot's time goes
+
+Every boot says it on the console, and every machine keeps it in
+`/run/werewolf/boot` as `kernel_ms`, `userland_ms` and `phases`, each a
+`name` and its `ms`:
+
+```
+werewolf: phases: kernel 0.225s, modules 0.386s, slot 0.227s, root 0.013s, mounts 0.012s, ...
+werewolf: up in 1.470s (the kernel 0.225s, userland 1.245s), handing over to runit
+```
+
+| Phase | Until |
+|---|---|
+| `kernel` | stage0 starts |
+| `modules` | stage0's modload closes the loader |
+| `slot` | the slot's filesystem is found and mounted (a slot's boot only) |
+| `root` | `root.erofs` is mounted through dm-verity |
+| `mounts`, `sysctls`, `network`, `victim`, `config`, `data` | init's steps of those names end |
+| `seal` | init has sealed itself and started the mount broker and the DHCP renewal |
+
+A reboot's other half is on the console too: stage 3 ends with `werewolf:
+down in Xs (services Ys, filesystems Zs)`, after `werewolf: SERVICE not
+down in 30s; killed` for any it had to kill. On a machine with slots, the update's
+`commit` or `rollback` event carries `down`: the seconds from its `reboot`
+event to the new kernel's start, which are the stop, the firmware and the
+loader. The console shows only the kernel's warnings and worse
+(`loglevel=5`); `dmesg` keeps every line with its time, so a gap between two
+of them is where to look next.
+
 ## CI
 
 [.github/workflows/check.yml](../.github/workflows/check.yml) runs `make
 test` and `make lint` on GitHub's x86_64 and arm64 Ubuntu runners, and `make
 check` split into jobs that run in parallel, so a failure names the area it
 is in: `forms`, `shellfree`, `integrity`, `cloud`, `persist` and, on arm64,
-`native`. [test/ci-setup](../test/ci-setup) installs the tools: Ubuntu's
-packages, and apko and Zig pinned by version and sha256; `ci-setup apko`
-installs apko alone, for jobs that only resolve packages. Each job keeps its
-logs when it fails.
+`native`. [test/ci-setup](../test/ci-setup) installs the tools with
+[tools/install-deps](../tools/install-deps), as `make install-deps` does
+anywhere: Ubuntu's packages, and apko and Zig pinned by version and
+sha256; `ci-setup apko` installs apko alone, for jobs that only resolve
+packages. Each job keeps its logs when it fails.
 
 The x86_64 runner has KVM, so it emulates fast and runs every group. The
 arm64 runner has none: a full boot there emulates under TCG, slowly. So arm64
@@ -292,4 +322,4 @@ between runs. `limactl delete -f werewolf-ci-24.04` starts over.
 `LIMA_TEMPLATE=ubuntu-26.04 make ci` runs it on 26.04, as GitHub's runners
 are, in a VM of its own; there, nested guests lose a CPU's timer early in
 boot and stall, so 24.04 is the default. Its old erofs-utils is replaced
-by [test/ci-setup](../test/ci-setup), which builds 1.9.4.
+by [tools/install-deps](../tools/install-deps), which builds 1.9.4.

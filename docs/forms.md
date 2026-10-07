@@ -74,10 +74,10 @@ none.
 Use `config NAME PATH` in a service file to give that service one file:
 
 ```text
-config host-key /run/config/bastion/host_key
+config authorized-keys /run/config/bastion/authorized_keys
 ```
 
-For service `sshd`, this creates `/run/svc/sshd/host-key`, owned by its
+For service `sshd`, this creates `/run/svc/sshd/authorized-keys`, owned by its
 user with mode `0600`. Point the program's configuration at that copy.
 The service cannot read the rest of `/run/config`.
 
@@ -92,6 +92,41 @@ Put credentials in the boot config, not the image; see
 [cloud.md](cloud.md). These runtime copies disappear at reboot.
 For a value needed in an environment variable, use `secret NAME PATH`
 instead.
+
+## Settings
+
+Values that differ per machine but are not secret, such as a bastion's
+destinations or an application's database URL, are *settings*. A service
+file declares each one with a type, and says where they go:
+
+```text
+config  settings /run/config/bastion/settings.json
+setting destinations addrport... as PermitOpen
+render  conf destinations
+```
+
+The `config settings` line names the file in the boot config that gives
+the values, and may name one that is missing:
+
+```json
+{"destinations": ["10.20.0.10:22"]}
+```
+
+At each start, leash copies it into the service's directory and runs
+`service-config` as the service, which checks every value against its
+declared type and writes `/run/svc/SERVICE/FILE`: `KEY=VALUE` lines
+(`env`, which leash adds to the service's environment), one JSON object
+(`json`, with `from PATH` merging into a file from the image), or
+`KEY VALUE...` lines (`conf`). A list (`TYPE...`) holds up to 32 values.
+The types are `ip`, `cidr`, `addrport`, `hostport`, `hostname`, `port`,
+`url`, `int`, `bool` and `string`.
+
+A setting not given, or an empty list, is left out, so the default in the
+daemon's own configuration holds; `required` keeps the service down
+instead. A key settings.json does not declare, or a value not of its type,
+keeps the service down, with one line naming the setting and why. Settings
+cannot add a directive: a value only fills a key the image declared. See
+[design/settings.md](design/settings.md).
 
 ## Your application
 
@@ -109,6 +144,33 @@ names the Wolfi packages it needs, and carries the application's files. So
 the code is in the verified, read-only root, built, signed, updated and
 rolled back with the rest, and nothing writable ever runs. What the
 application keeps is data, in `/data/svc/app`, its working directory.
+
+### Without a form: `--app`
+
+Where a runtime form already starts the application as it should be
+started, its files are all a machine needs. `--app DIR` lays a directory
+where the form keeps its application (its `etc/werewolf/app`: `/usr/lib/app`
+for `python`, `node` and `jre`; nginx's html root for `nginx` and `php`):
+
+```sh
+build/host/werewolf create python web --app ./myapp     # ./myapp/main.py, on :8080
+build/host/werewolf build python --app ./myapp          # the release files, for elsewhere
+```
+
+DIR is what the application's own toolchain made (`go build`, `dotnet
+publish`, `mvn package`, a checkout): regular files and directories, an
+executable bit kept, nothing setuid, no links. werewolf prints its sha256,
+over every path, executable bit and byte, so the same DIR makes the same
+image. An image with an application builds apart from the form's own, and
+a new application is a new machine: `werewolf delete`, then `create`.
+[apps-by-hand.md](apps-by-hand.md) does all of it with `make` and `tar`,
+to show the mechanism underneath.
+
+What the application needs from each machine, a database's address or a
+greeting, is a setting its form declares, and a form of your own declares
+it: `examples/python`'s form takes `--greeting TEXT` and hands it to the
+application as `GREETING` (`render env`, [Settings](#settings)). A secret
+is a file, given with `config` and read from `/run/svc/app`.
 
 ### A Python web server
 

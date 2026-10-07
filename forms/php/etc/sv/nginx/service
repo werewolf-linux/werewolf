@@ -4,6 +4,6 @@
 exec    /usr/bin/nginx -e stderr
 before  /usr/bin/nginx -e stderr -t -q
 user    nginx
-pledge  stdio rpath wpath proc unix inet listen connect aio
+pledge  stdio rpath wpath proc unix inet listen connect aio sendfile
 listen  tcp/80
 read    /etc/nginx

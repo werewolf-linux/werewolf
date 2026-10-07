@@ -33,15 +33,23 @@ privilege-separated binaries for basic functions such as auto-updates. Images ar
 
 ```sh
 make install-deps          # macOS, Debian, Ubuntu, Fedora, Arch; FreeBSD: tools/install-deps
-make lima                  # build, boot and ssh in (macOS)
+make werewolf              # the werewolf command, for this machine: build/host/werewolf
+alias werewolf=build/host/werewolf
 
-# or with QEMU alone
-make run                   # the sshd form, with a root shell on the console
-make run FORM=prod         # the production base: no shell, nothing listening
-make run FORM=prod DEV=1   # the same, with a shell added for debugging
-make run-ssh               # from another terminal
+werewolf run prod --dev    # the production base under QEMU, here, a shell on the console
+werewolf create bastion edge --authorized-keys ~/.ssh/id_ed25519.pub \
+    --destinations 10.20.0.10:22          # a VM that stays: Lima on a Mac, else QEMU here
+werewolf create python web --app ./myapp  # your application on the python form, on :8080
+werewolf create prod-ssh box --on gcp --root-keys ~/.ssh/id_ed25519.pub
+werewolf console edge      # a VM's serial console, where a machine with no shell speaks
+werewolf delete edge
 make webshell-demo         # a deliberately vulnerable web app on :8080; try to escape it
 ```
+
+`create` builds the form, packs the machine's config, starts it and prints
+its name, address and form. `make` is the build; `werewolf` is how you use
+what it builds ([docs/design/cli.md](docs/design/cli.md)). `make run` and
+`make lima` remain, for working on werewolf itself.
 
 `posture` runs at every boot and prints what passed and what did not. It is
 a static binary that assumes nothing about werewolf, so copy it to any Linux
@@ -49,11 +57,22 @@ machine and compare. See [docs/posture.md](docs/posture.md).
 
 ## Configure it
 
-Secrets travel in a config tar. Put `authorized_keys`, `hostname` and
-`data.key`, which puts `/data` in LUKS2, in `config/`, which is gitignored, and run
-`make config-tar`. init finds the tar raw on any block device or in the
-cloud's user data, and leaves it in `/run/config`, readable by root alone.
-See [docs/cloud.md](docs/cloud.md).
+A machine's secrets and settings travel in a config tar, never in the
+image. Its form declares what it takes, and `werewolf` turns flags into
+the tar, checked first with the code the machine checks it with: a bad
+route or a missing key fails on your laptop, naming the file.
+
+```sh
+werewolf pack bastion -h                   # the flags bastion takes
+werewolf pack bastion -o edge.tar --authorized-keys ~/.ssh/id_ed25519.pub \
+    --destinations 10.20.0.10:22 --hostname edge
+```
+
+`run` and `create` take the same flags. A tar packed by hand works too:
+init finds it raw on any block device or in the cloud's user data, and
+leaves it in `/run/config`, readable by root alone. `data.key` puts
+`/data` in LUKS2. See [docs/cloud.md](docs/cloud.md) and
+[docs/forms.md](docs/forms.md#settings).
 
 ## Forms
 
@@ -67,8 +86,8 @@ one includes `minimal`. `make list-forms` shows the include chains.
 | `prod` | DHCP, the cloud's metadata, updates itself, `/data` on a disk (in LUKS2 with `data.key`); no shell, nothing listening. Build yours on this. |
 | `app` | `prod` plus an unprivileged application user and group; no runtime or service |
 | `prod-ssh` | `prod` plus sshd |
-| `bastion` | forwarding-only SSH with explicit destinations and hybrid post-quantum key exchange ([setup](docs/bastion.md)) |
-| `tailscale` | unprivileged, userspace subnet router ([setup](docs/tailscale.md)) |
+| `bastion` | forwarding-only SSH with explicit destinations and hybrid post-quantum key exchange ([security and tutorial](examples/bastion/README.md)) |
+| `tailscale` | unprivileged, userspace subnet router ([security and tutorial](examples/tailscale/README.md)) |
 | `nginx`, `php`, `node`, `python`, `jre` | `prod` and one runtime, leashed: bake your site or application into a form on one ([docs/forms.md](docs/forms.md)) |
 | `postgresql`, `demo` | leashed services |
 | `webshell-example` | a deliberately vulnerable web app, to show the sandbox holds (`make webshell-demo`) |
@@ -95,4 +114,5 @@ after a healthy minute. See [docs/bite.md](docs/bite.md).
 - [docs/programs.md](docs/programs.md): the programs in `cmd/` and what confines them in `lib/`
 - [docs/data.md](docs/data.md): `/data`, disks and encryption
 - [docs/postgresql.md](docs/postgresql.md) and [docs/demo.md](docs/demo.md): running a leashed service
+- [docs/cve-mitigation-survey.md](docs/cve-mitigation-survey.md): four years of exploited Linux CVEs from CISA's KEV catalog, and whether each would have worked on werewolf
 - [docs/roadmap.md](docs/roadmap.md): what comes next

@@ -21,8 +21,7 @@ DIR holds a slot (*Slots*, below) of any form.
 repository, it builds `prod-ssh`'s slot, the form that can still be
 reached by ssh afterwards, and runs `bite -i` on it. `FORM=` picks another,
 and `config/`, if present, joins the config tar. The build needs apko, Zig
-and erofs-utils 1.9 or later; on Ubuntu, `sudo test/ci-setup` installs
-them.
+and erofs-utils 1.9 or later; `make install-deps` installs them.
 
 **`-i` looks before it leaps.** After installing, bite mounts the new
 root read-only, with the distro's kernel, and opens the image's own shell

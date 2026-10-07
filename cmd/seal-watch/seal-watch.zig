@@ -4,10 +4,10 @@
 //! promises and hands the rest to this program through a seccomp listener
 //! (SECCOMP_RET_USER_NOTIF), passed over a socket on stdin at boot. Each
 //! service holds itself to its own pledge with a filter of its own that
-//! refuses with ENOSYS (leash, after dropping CAP_SYS_ADMIN, cannot make a
-//! listener), so what reaches here is what a program running under the
-//! machine seal alone, werewolf's own, makes outside the machine's
-//! promises. It answers each:
+//! refuses with ENOSYS, and the kernel takes ENOSYS over a listener, so
+//! what reaches here is what a program running under the machine seal
+//! alone, werewolf's own, makes outside the machine's promises; a leashed
+//! service's refusals are not seen here. It answers each:
 //!
 //!     enforce   refused as if the kernel had no such call (ENOSYS); said
 //!               once, with the promise that would allow it, and counted in
@@ -18,23 +18,39 @@
 //!               machine installs no per-service filters either, so every
 //!               call reaches here:
 //!               seal-watch:
-//! {"event":"learned","call":"memfd_create","promise":"memfd","exe":"/usr/bin/node"}
+//! {"event":"learned","call":"memfd_create","promise":"memfd","service":"app","exe":"/usr/bin/node"}
 //!
-//! What no promise brings (lib/seal.zig, never) is refused either way.
+//! What no promise brings (lib/seal.zig, never) is refused either way, and
+//! so is what the seal refuses by its arguments (lib/seal.zig, refusal): a
+//! socket family no promise names, kernel TLS, a watch queue, a CPU-time
+//! timer. Those are answered as a kernel without the feature would answer,
+//! and said with what was asked for:
+//!               seal-watch:
+//! {"event":"refused","call":"socket","promise":"never","why":"socket family","arg":38,"pid":97}
 //! init decides to learn: only on a DEV=1 build, never released, booted
 //! with werewolf.seal=learn.
 //!
+//! It is one process that answers every caller in turn, so it says each
+//! call once, and past 512 refused counts the rest together, as other,
+//! said once (learning, past 4096 it says no more): a flood of new calls
+//! cannot hold the console, and with it every caller.
+//!
 //! init starts it before the seal, so it is not under it. Enforcing, it
-//! becomes nobody with no capabilities, under no_new_privs and a filter of
-//! its own that allows the calls of its loop and nothing else. Learning, it
-//! stays root, to read each caller's /proc/PID/exe.
+//! becomes _seal, an account of its own that no service shares and so none
+//! may signal, with no capabilities, under no_new_privs and a filter of its
+//! own (lib/sandbox.zig) that allows the calls of its loop, ioctl only for
+//! the listener's two, and kills it for anything else or another
+//! architecture. Learning, it stays root, to read each caller's
+//! /proc/PID/exe.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const seal = @import("seal");
+const sandbox = @import("sandbox");
 const linux = std.os.linux;
 
-const nobody = 65534;
+/// _seal, seal-watch's own account (forms/minimal.yaml).
+const seal_id = 66;
 
 pub fn main() void {
     var mode_buf: [8]u8 = undefined;
@@ -61,8 +77,10 @@ pub fn main() void {
     );
     if (linux.errno(table) != .SUCCESS)
         say("cannot write {s}: {s}", .{ seal.refused_path, @tagName(linux.errno(table)) });
-    if (!learn) confine() catch |err| {
-        say("cannot confine itself: {s}; unlisted calls are refused unsaid", .{@errorName(err)});
+    if (!learn) confine() catch {
+        say("cannot confine itself: {s} {s}; unlisted calls are refused unsaid", .{
+            sandbox.failed, sandbox.errnoName(sandbox.failed_errno),
+        });
         linux.exit_group(1);
     };
     say("{{\"event\":\"start\",\"mode\":\"{s}\"}}", .{if (learn) "learn" else "enforce"});
@@ -98,39 +116,20 @@ const scm_rights = 1;
 /// struct cmsghdr (a size_t and two ints) and one int, aligned.
 const cmsg_space = 24;
 
-/// nobody, no capabilities, no_new_privs, and a filter allowing only what
-/// serve calls.
+/// _seal, with no capabilities, now or ever (the bounding set emptied),
+/// and a filter allowing only what serve and say call: ioctl only to hear
+/// and answer the listener, not on the console it writes to.
 fn confine() !void {
-    if (linux.errno(linux.setgroups(0, &[_]linux.gid_t{})) != .SUCCESS) return error.Groups;
-    if (linux.errno(linux.setresgid(nobody, nobody, nobody)) != .SUCCESS) return error.Gid;
-    if (linux.errno(linux.setresuid(nobody, nobody, nobody)) != .SUCCESS) return error.Uid;
-    if (linux.errno(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) != .SUCCESS)
-        return error.NoNewPrivs;
-    const prog = extern struct { len: u16, filter: [*]const Filter }{
-        .len = own_filter.len,
-        .filter = &own_filter,
-    };
-    if (linux.errno(linux.seccomp(1, 0, &prog)) != .SUCCESS) return error.Seccomp;
+    try sandbox.dropTo(seal_id, null);
+    var f: sandbox.Filter = .{};
+    inline for (.{
+        "write",      "pwrite64", "ftruncate",    "clock_gettime",
+        "exit_group", "exit",     "rt_sigreturn",
+    }) |name| f.allow(name);
+    f.allowArg("ioctl", 1, notif_recv);
+    f.allowArg("ioctl", 1, notif_send);
+    try f.install();
 }
-
-const Filter = extern struct { code: u16, jt: u8, jf: u8, k: u32 };
-
-/// What serve and say call, enforcing; anything else kills this program.
-const own_calls = [_]linux.SYS{
-    .ioctl,      .write, .pwrite64,     .ftruncate, .clock_gettime,
-    .exit_group, .exit,  .rt_sigreturn,
-};
-
-const own_filter = blk: {
-    var f: [1 + 2 * own_calls.len + 1]Filter = undefined;
-    f[0] = .{ .code = 0x20, .jt = 0, .jf = 0, .k = 0 }; // load seccomp_data.nr
-    for (own_calls, 0..) |sys, i| {
-        f[1 + 2 * i] = .{ .code = 0x15, .jt = 0, .jf = 1, .k = @intCast(@backingInt(sys)) };
-        f[2 + 2 * i] = .{ .code = 0x06, .jt = 0, .jf = 0, .k = 0x7fff0000 }; // allow
-    }
-    f[f.len - 1] = .{ .code = 0x06, .jt = 0, .jf = 0, .k = 0x80000000 }; // kill the process
-    break :blk f;
-};
 
 /// struct seccomp_notif, and struct seccomp_notif_resp.
 const Notif = extern struct {
@@ -152,12 +151,14 @@ const flag_continue: u32 = 1;
 const max_rows = 512;
 const max_learned = 4096;
 
-/// One call refused this boot.
-const Row = struct { nr: u32, count: u64, pid: u32, first: i64 };
+/// One call refused this boot; never if no promise could allow it.
+const Row = struct { nr: u32, count: u64, pid: u32, first: i64, never: bool = false };
 
 fn serve(fd: i32, learn: bool, table: i32) noreturn {
     var rows: [max_rows]Row = undefined;
     var n_rows: usize = 0;
+    // Every call past the rows, counted together.
+    var other: Row = .{ .nr = 0, .count = 0, .pid = 0, .first = 0 };
     var learned: [max_learned]u64 = undefined;
     var n_learned: usize = 0;
     var buf: [64 << 10]u8 = undefined;
@@ -173,59 +174,92 @@ fn serve(fd: i32, learn: bool, table: i32) noreturn {
             },
         }
         const nr: u32 = @bitCast(req.nr);
-        const allow = learn and !isNever(nr);
+        const why = seal.refusal(nr, req.args);
+        const never = isNever(nr) or why != null;
+        const allow = learn and !never;
         var exe_buf: [256]u8 = undefined;
+        var cgroup_buf: [256]u8 = undefined;
         const exe = if (allow) exeOf(req.pid, &exe_buf) else "";
+        const service = if (allow) serviceOf(req.pid, &cgroup_buf) else "";
         const resp: Resp = .{
             .id = req.id,
             .val = 0,
-            .@"error" = if (allow) 0 else -@as(i32, @backingInt(linux.E.NOSYS)),
+            .@"error" = if (allow) 0 else -@as(i32, @backingInt(if (why) |w| w.errno else .NOSYS)),
             .flags = if (allow) flag_continue else 0,
         };
         _ = linux.ioctl(fd, notif_send, @intFromPtr(&resp));
         if (allow) {
-            const key = std.hash.Wyhash.hash(nr, exe);
+            const key = std.hash.Wyhash.hash(std.hash.Wyhash.hash(nr, exe), service);
             if (std.mem.findScalar(u64, learned[0..n_learned], key) != null) continue;
-            if (n_learned < learned.len) {
-                learned[n_learned] = key;
-                n_learned += 1;
-            }
+            if (n_learned == learned.len) continue;
+            learned[n_learned] = key;
+            n_learned += 1;
             say(
-                "{{\"event\":\"learned\",\"call\":\"{s}\",\"promise\":\"{s}\",\"exe\":\"{s}\"}}",
-                .{ callName(nr), promiseName(nr), exe },
+                "{{\"event\":\"learned\",\"call\":\"{s}\",\"promise\":\"{s}\"," ++
+                    "\"service\":\"{s}\",\"exe\":\"{s}\"}}",
+                .{ callName(nr), promiseName(nr), service, exe },
             );
+            // Full: the rest are allowed, unsaid.
+            if (n_learned == learned.len)
+                say("{{\"event\":\"learning-full\",\"after\":{d}}}", .{max_learned});
             continue;
         }
         const row = for (rows[0..n_rows]) |*r| {
             if (r.nr == nr) break r;
-        } else blk: {
-            say(
+        } else if (n_rows < max_rows) blk: {
+            if (why) |w| say(
+                "{{\"event\":\"refused\",\"call\":\"{s}\",\"promise\":\"never\"," ++
+                    "\"why\":\"{s}\",\"arg\":{d},\"pid\":{d}}}",
+                .{ callName(nr), w.what, w.arg, req.pid },
+            ) else say(
                 "{{\"event\":\"refused\",\"call\":\"{s}\",\"promise\":\"{s}\",\"pid\":{d}}}",
                 .{ callName(nr), promiseName(nr), req.pid },
             );
-            if (n_rows == max_rows) continue;
-            var ts: linux.timespec = undefined;
-            _ = linux.clock_gettime(.REALTIME, &ts);
-            rows[n_rows] = .{ .nr = nr, .count = 0, .pid = req.pid, .first = ts.sec };
+            rows[n_rows] = .{
+                .nr = nr,
+                .count = 0,
+                .pid = req.pid,
+                .first = now(),
+                .never = never,
+            };
             n_rows += 1;
             break :blk &rows[n_rows - 1];
+        } else blk: {
+            if (other.count == 0) {
+                say(
+                    "{{\"event\":\"refused\",\"call\":\"other\",\"pid\":{d},\"after\":{d}}}",
+                    .{ req.pid, max_rows },
+                );
+                other.first = now();
+            }
+            break :blk &other;
         };
         row.count += 1;
         row.pid = req.pid;
         if (table >= 0) {
-            const text = tableText(&buf, rows[0..n_rows]);
+            const text = tableText(&buf, rows[0..n_rows], other);
             _ = linux.pwrite(table, text.ptr, text.len, 0);
             _ = linux.ftruncate(table, @intCast(text.len));
         }
     }
 }
 
-/// The refused table: CALL COUNT LAST_PID FIRST_SECONDS PROMISE a line.
-fn tableText(buf: []u8, rows: []const Row) []const u8 {
+fn now() i64 {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.REALTIME, &ts);
+    return ts.sec;
+}
+
+/// The refused table: CALL COUNT LAST_PID FIRST_SECONDS PROMISE a line, and
+/// other, every call past the rows, once there is one.
+fn tableText(buf: []u8, rows: []const Row, other: Row) []const u8 {
     var out: std.Io.Writer = .fixed(buf);
     for (rows) |r| out.print("{s} {d} {d} {d} {s}\n", .{
-        callName(r.nr), r.count, r.pid, r.first, promiseName(r.nr),
+        callName(r.nr), r.count, r.pid, r.first, if (r.never) "never" else promiseName(r.nr),
     }) catch break;
+    if (other.count > 0) out.print("other {d} {d} {d} none\n", .{
+        other.count, other.pid, other.first,
+    }) catch {};
     return out.buffered();
 }
 
@@ -257,10 +291,46 @@ fn exeOf(pid: u32, buf: *[256]u8) []const u8 {
     path[p.len] = 0;
     const n = linux.readlink(@ptrCast(&path), buf, buf.len);
     if (linux.errno(n) != .SUCCESS) return "?";
-    for (buf[0..n]) |*c| if (c.* < 0x20 or c.* == '"' or c.* == '\\' or c.* > 0x7e) {
+    return plain(buf[0..n]);
+}
+
+/// The service pid runs as, from its cgroup, where leash puts each service
+/// (/run/cgroup/svc/NAME); - for werewolf's own programs, or a process gone.
+fn serviceOf(pid: u32, buf: *[256]u8) []const u8 {
+    var path: [32]u8 = undefined;
+    const p = std.mem.print(path[0 .. path.len - 1], "/proc/{d}/cgroup", .{pid}) catch return "-";
+    path[p.len] = 0;
+    const rc = linux.open(@ptrCast(&path), .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    if (linux.errno(rc) != .SUCCESS) return "-";
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    const n = linux.read(fd, buf, buf.len);
+    if (linux.errno(n) != .SUCCESS) return "-";
+    return cgroupService(buf[0..n]);
+}
+
+/// The service in /proc/PID/cgroup's cgroup2 line, 0::/svc/NAME, or -.
+fn cgroupService(text: []u8) []const u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const prefix = "0::/svc/";
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        const rest = line[prefix.len..];
+        const name = rest[0 .. std.mem.findScalar(u8, rest, '/') orelse rest.len];
+        if (name.len == 0) return "-";
+        const at = @intFromPtr(name.ptr) - @intFromPtr(text.ptr);
+        return plain(text[at..][0..name.len]);
+    }
+    return "-";
+}
+
+/// s, each character that is not plain printable ASCII, or would end a
+/// JSON string, made ?.
+fn plain(s: []u8) []const u8 {
+    for (s) |*c| if (c.* < 0x20 or c.* == '"' or c.* == '\\' or c.* > 0x7e) {
         c.* = '?';
     };
-    return buf[0..n];
+    return s;
 }
 
 var line_buf: [512]u8 = undefined;
@@ -273,11 +343,15 @@ fn say(comptime fmt: []const u8, args: anytype) void {
 
 const testing = std.testing;
 
-test own_filter {
-    try testing.expectEqual(1 + 2 * own_calls.len + 1, own_filter.len);
-    try testing.expectEqual(@as(u32, 0x80000000), own_filter[own_filter.len - 1].k);
-    try testing.expect(std.mem.findScalar(linux.SYS, &own_calls, .ioctl) != null);
-    try testing.expect(std.mem.findScalar(linux.SYS, &own_calls, .openat) == null);
+test cgroupService {
+    var a = "0::/svc/nginx\n".*;
+    try testing.expectEqualStrings("nginx", cgroupService(&a));
+    var b = "0::/svc/app/child\n".*;
+    try testing.expectEqualStrings("app", cgroupService(&b));
+    var c = "0::/\n".*;
+    try testing.expectEqualStrings("-", cgroupService(&c));
+    var d = "0::/svc/a\"b\n".*;
+    try testing.expectEqualStrings("a?b", cgroupService(&d));
 }
 
 test callName {
@@ -302,7 +376,28 @@ test tableText {
         .first = 1791335742,
     }};
     var buf: [256]u8 = undefined;
-    try testing.expectEqualStrings("keyctl 2 97 1791335742 never\n", tableText(&buf, &rows));
+    const none: Row = .{ .nr = 0, .count = 0, .pid = 0, .first = 0 };
+    try testing.expectEqualStrings(
+        "keyctl 2 97 1791335742 never\n",
+        tableText(&buf, &rows, none),
+    );
+    const past: Row = .{ .nr = 0, .count = 5, .pid = 98, .first = 1791335800 };
+    try testing.expectEqualStrings(
+        "keyctl 2 97 1791335742 never\nother 5 98 1791335800 none\n",
+        tableText(&buf, &rows, past),
+    );
+    // A call some promise allows, refused for what it asked: never.
+    const family = [_]Row{.{
+        .nr = @intCast(@backingInt(linux.SYS.socket)),
+        .count = 1,
+        .pid = 97,
+        .first = 1791335742,
+        .never = true,
+    }};
+    try testing.expectEqualStrings(
+        "socket 1 97 1791335742 never\n",
+        tableText(&buf, &family, none),
+    );
 }
 
 test "ioctl numbers" {

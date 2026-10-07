@@ -9,6 +9,8 @@
 #                        DISK_MIB sets its size (8192), DISK_ARGS adds kernel arguments
 #   make config-tar      pack config/ (ssh keys, hostname, data.key) into the tar run attaches
 #   make list-forms      each form and the forms it includes
+#   make werewolf        the werewolf command, for this machine: build/host/werewolf;
+#                        werewolf pack FORM packs a config tar from flags (docs/design/cli.md)
 #
 # Boot
 #   make run             build and boot it under QEMU, the console here
@@ -31,17 +33,22 @@
 #                        make -j check boots them side by side
 #   make check-FORM      one form's boot, built with a shell for the checks;
 #                        check-shellfree-FORM boots it as it ships, without one
-#   make check-updater   a whole update, fetched from Wolfi and Alpine
+#   make check-updater   a whole update, fetched from Wolfi and Alpine;
+#                        check-updater-staged cuts the power once it is staged,
+#                        and the next boot must take it
 #   make check-gcp       prod-ssh's disk on a Google Compute Engine VM, then deleted
 #   make ci              CI's check job, in an Ubuntu VM under Lima
 #   make posture         build posture; on Linux, run it here with sudo
 #
 # Release
-#   make relock          re-resolve the packages FORM, stage0 and the kernel are pinned to
+#   make relock          re-resolve the lock a FREEZE=1 or release build pins to
+#                        (default builds resolve the current packages, unpinned)
 #   make release-inputs  relock the released forms and digest what they build from;
 #                        CI releases when the digest changes
 #   make dist            the released forms' files and unsigned manifests, in dist/
 #   make check-dist      boot dist/'s disks as published, under UEFI
+#   make cve-tiers       build the CVE tiers feed here, in build/tiers/; needs an NVD
+#                        API key in NVD_API_KEY, or the file NVD_API_KEY_FILE names
 #   make clean           remove build/, but for the package pins in build/lock
 #
 # FORM picks the form (default sshd; make lima implies lima, make bite-me
@@ -82,10 +89,18 @@ CHAIN_DIRS := $(wildcard $(addprefix forms/,$(CHAIN)))
 #               the form's modules (x86_64), with nested virtualization off
 #   nested-kvm  and let their guests run virtual machines too; needs kvm
 #   netadmin    CAP_NET_ADMIN after boot, which fence otherwise drops: to
-#               change addresses and routes, as a DHCP client renewing does
-#   packet      CAP_NET_RAW after boot: packet sockets, which a DHCP client
-#               listens on, and which pass below fence's rules
-ALLOWANCES = kvm nested-kvm netadmin packet
+#               change addresses, routes and fence's rules. DHCP needs none:
+#               init starts its renewal before fence
+#   packet      CAP_NET_RAW after boot: packet sockets, which pass below
+#               fence's rules
+#   ipv6        IPv6, which the kernel is otherwise booted without
+#               (ipv6.disable=1): no address family, and none of the code
+#               behind it (docs/cve-mitigation-survey.md, CVE-2026-53362)
+#   pty         pseudo-terminals, for ssh logins: init mounts devpts.
+#               Without it /dev/ptmx opens nothing, for root too, and the
+#               TTY layer's pseudo-terminal code is out of reach
+#               (CVE-2014-0196)
+ALLOWANCES = kvm nested-kvm netadmin packet ipv6 pty
 ALLOW_FILES := $(wildcard $(addsuffix /etc/werewolf/allow/*,$(CHAIN_DIRS)))
 ALLOW := $(sort $(notdir $(ALLOW_FILES)))
 ifneq ($(filter-out $(ALLOWANCES),$(ALLOW)),)
@@ -110,13 +125,20 @@ endif
 # shuffled order: neither costs a program anything. init_on_alloc and the
 # kernel stack's random offset are Alpine's kernel's defaults already;
 # init_on_free, which costs allocation-heavy work, is left off by choice
-# (docs/security.md).
+# (docs/security.md). No IPv6, unless the form allows it.
 KERNEL_ARGS = debugfs=off proc_mem.force_override=never slab_nomerge page_alloc.shuffle=1
+KERNEL_ARGS += $(if $(filter ipv6,$(ALLOW)),,ipv6.disable=1)
 ifeq ($(ARCH),aarch64)
 KERNEL_ARGS += $(if $(filter nested-kvm,$(ALLOW)),kvm-arm.mode=nested,$(if $(filter kvm,$(ALLOW)),,kvm-arm.mode=none))
 else
 KERNEL_ARGS += ia32_emulation=0
 endif
+# The console shows the kernel's warnings and worse; dmesg keeps every
+# message. The kernel writes its console as it goes, and a cloud's serial
+# port takes a millisecond a line: on GCP its boot's notices and info took
+# half its time (0.23 s against 0.11 s). Panics, stalls, BUG and the
+# power-down line, which test/boot reads, are all errors or worse.
+KERNEL_ARGS += loglevel=5
 # Parameters the image loads modules with, MODULE:KEY=VALUE, one a word: on
 # x86_64, KVM's nested virtualization, which Linux turns on by default.
 # A parameter for a module the form does not carry fails the build.
@@ -141,6 +163,10 @@ DHCP_BIN := $(if $(filter prod,$(CHAIN)),$(DHCP))
 CLOUD := $(PROGRAMS)/cloud-metadata/usr/lib/werewolf/cloud-metadata
 CLOUD_BIN := $(if $(filter prod,$(CHAIN)),$(CLOUD))
 BITE_CLEANUP := $(PROGRAMS)/bite-cleanup/usr/bin/bite-cleanup
+# service-config renders a leashed service's settings (docs/design/settings.md),
+# in every form on prod, where settings come from the cloud or a config disk.
+SERVICE_CONFIG := $(PROGRAMS)/service-config/usr/lib/werewolf/service-config
+SERVICE_CONFIG_BIN := $(if $(filter prod,$(CHAIN)),$(SERVICE_CONFIG))
 # PostgreSQL's helpers, in any form whose chain includes postgresql:
 # pg-init, which makes the cluster and applies the image's SQL, and
 # popen-shim.so, which pg-init preloads into initdb in place of a shell. The
@@ -168,14 +194,15 @@ SEAL_PROGRAMS := seal-watch seal
 SEAL_BINS := $(foreach p,$(SEAL_PROGRAMS),$(PROGRAMS)/$(p)/usr/lib/werewolf/$(p))
 # What a shell script used to do, one small program each (docs/design/shell-free.md):
 # runit's stages, reboot and poweroff, GRUB's environment block, and the
-# slot-keep, power-button, debug-shell and sshd services; and leash, which starts
+# slot-keep, power-button, debug-shell and sshd services, and the host key a
+# leashed sshd makes on first boot (ssh-host-key); and leash, which starts
 # a service someone else wrote. The forms link to them.
-SHELLFREE := runit-stage reboot grub-setenv slot-keep power-button debug-shell sshd-start leash leash-reap
+SHELLFREE := runit-stage reboot grub-setenv slot-keep power-button debug-shell sshd-start ssh-host-key leash leash-reap
 SHELLFREE_BINS := $(foreach p,$(SHELLFREE),$(PROGRAMS)/$(p)/usr/lib/werewolf/$(p))
 UPDATER_BIN := $(if $(filter prod,$(CHAIN)),$(PROGRAMS)/slot-update/usr/lib/werewolf/slot-update)
 STATUS_BIN := $(if $(filter demo,$(CHAIN)),$(PROGRAMS)/status-page/usr/lib/werewolf/status-page)
-OVERLAY_DIRS := $(CHAIN_DIRS) build/$(ARCH)/$(FORM)$(if $(DEV),-dev)/ro $(PROGRAMS)/init $(PROGRAMS)/modload $(PROGRAMS)/iface-up $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/mount-broker $(PROGRAMS)/posture $(addprefix $(PROGRAMS)/,$(SEAL_PROGRAMS) $(SHELLFREE)) $(if $(DHCP_BIN),$(PROGRAMS)/dhcp-client) $(if $(CLOUD_BIN),$(PROGRAMS)/cloud-metadata) $(PROGRAMS)/bite-cleanup $(if $(PG_BINS),$(PROGRAMS)/postgresql) $(if $(UPDATER_BIN),$(PROGRAMS)/slot-update) \
-	$(if $(STATUS_BIN),$(PROGRAMS)/status-page)
+OVERLAY_DIRS = $(CHAIN_DIRS) $(OUT)/ro $(PROGRAMS)/init $(PROGRAMS)/modload $(PROGRAMS)/iface-up $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/mount-broker $(PROGRAMS)/posture $(addprefix $(PROGRAMS)/,$(SEAL_PROGRAMS) $(SHELLFREE)) $(if $(DHCP_BIN),$(PROGRAMS)/dhcp-client) $(if $(CLOUD_BIN),$(PROGRAMS)/cloud-metadata) $(PROGRAMS)/bite-cleanup $(if $(PG_BINS),$(PROGRAMS)/postgresql) $(if $(UPDATER_BIN),$(PROGRAMS)/slot-update) \
+	$(if $(STATUS_BIN),$(PROGRAMS)/status-page) $(if $(SERVICE_CONFIG_BIN),$(PROGRAMS)/service-config)
 
 # --- locks --------------------------------------------------------------------
 # Every package in an image is pinned by a lock, apko's own, covering both
@@ -201,14 +228,18 @@ FORM_LOCK = $(LOCK)/$(FORM)$(if $(DEV),-dev).lock.json
 apko_lock = mkdir -p $(LOCK) && cd $(dir $(1)) && \
 	apko lock --arch aarch64,x86_64 --include-paths $(CURDIR)/forms --output $(CURDIR)/$@ $(notdir $(1))
 
-# apko build-minirootfs CONFIG into $@, pinned to every package LOCK names
-# for ARCH. apko writes the pins into /etc/apk/world; meta puts the plain
-# world back, so the machine's own apk is not held to them.
+# apko build-minirootfs CONFIG into $@, resolving each package to the version
+# the repositories hold now and verifying it against CONFIG's keyring. Versions
+# are not pinned by default: Wolfi keeps only the latest, so a pin breaks the
+# moment a package moves, and a werewolf instance updates itself at first boot
+# (forms/prod, cmd/slot-update) anyway -- so the published, signed image, not a
+# source rebuild, is the artifact of record. FREEZE=1 pins to the versions LOCK
+# ($(2)) names, for a reproducible build; EXTRA ($(3)) adds packages CONFIG does
+# not name, as a DEV build adds a shell.
 define apko_build
-pins=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(.*\)-\([^-]*-r[0-9]*\)\.apk".*|-p \1=\2|p' $(2)) && \
-	[ -n "$$pins" ] || { echo "$(2) names no packages for $(ARCH); make relock" >&2; exit 1; }; \
+pins=$(if $(FREEZE),$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(.*\)-\([^-]*-r[0-9]*\)\.apk".*|-p \1=\2|p' $(2))) && \
 	mkdir -p $(dir $@) && cd $(dir $(1)) && \
-	apko build-minirootfs --build-arch $(ARCH) $$pins $(notdir $(1)) $(CURDIR)/$@
+	apko build-minirootfs --build-arch $(ARCH) $$pins $(3) $(notdir $(1)) $(CURDIR)/$@
 endef
 
 # A tar of directories laid over one another in order, whose bytes depend
@@ -250,7 +281,11 @@ MODULE_LISTS := $(wildcard $(addprefix forms/,$(addsuffix .modules,$(CHAIN))))
 NET_LISTS := $(wildcard $(addprefix forms/,$(addsuffix .net,$(CHAIN))))
 
 BUILD = build/$(ARCH)
-OUT = $(BUILD)/$(FORM)$(if $(DEV),-dev)
+# APP: an application's files, staged by werewolf build, run or create
+# --app (cmd/werewolf/app.zig) and laid over the image where the form keeps
+# its application (etc/werewolf/app). An image with one builds apart.
+APP ?=
+OUT = $(BUILD)/$(FORM)$(if $(DEV),-dev)$(if $(APP),-app)
 TAR ?=$(shell command -v bsdtar || echo tar)
 SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 
@@ -274,9 +309,14 @@ VMTYPE = qemu
 endif
 LIMA_CONSOLE = $(if $(filter vz,$(VMTYPE)),hvc0,$(CONSOLE))
 
+# A recipe that fails takes what it half-made with it: a compiler's empty
+# output, a lock apko stopped writing. Otherwise the next make would find
+# it newer than its sources and call it built.
+.DELETE_ON_ERROR:
+
 # A target whose name starts with _ is a step another target runs, with
 # FORM set for it; `make help` lists the ones to type.
-.PHONY: all install-deps image slot bite-me disk run run-ssh lima lima-delete demo demo-delete webshell-demo _webshell-demo config-tar list-forms test check seal-learn check-slot check-updater check-updater-release _check-updater check-nodata check-lease check-unsigned check-verity check-metadata check-dist check-gcp demo-gcp demo-gcp-delete webshell-gcp webshell-gcp-delete ci relock release-inputs dist posture clean help \
+.PHONY: all install-deps image slot bite-me disk run run-ssh lima lima-delete demo demo-delete webshell-demo _webshell-demo config-tar list-forms test check seal-learn check-slot check-updater check-updater-staged check-updater-release _check-updater check-nodata check-lease check-unsigned check-verity check-metadata check-dist check-gcp demo-gcp demo-gcp-delete webshell-gcp webshell-gcp-delete ci relock release-inputs dist posture clean help \
 	_check-form _check-shellfree-boot _check-slot-boot _check-updater-boot _check-nodata-boot _check-lease-boot _check-unsigned-boot _check-unsigned-slot _check-metadata-boots _dist-form _check-dist-disk _check-gcp
 
 all: image
@@ -288,6 +328,10 @@ install-deps:
 
 # Compiled tutorial applications; their toolchains stay on the build host.
 include examples/build.mk
+ifneq ($(APP),)
+OVERLAY_DIRS += $(APP)
+$(OUT)/meta.stamp $(OUT)/overlay.tar: $(shell find $(APP) -type f -o -type d)
+endif
 
 image: $(BUILD)/vmlinuz $(OUT)/initramfs.zst
 
@@ -316,10 +360,16 @@ relock:
 $(BUILD)/kernel/rootfs.tar: $(LOCK)/kernel.lock.json
 	$(call apko_build,boot/kernel.yaml,$<)
 
-$(BUILD)/vmlinuz: $(BUILD)/kernel/rootfs.tar
+# Alpine's config, checked for what werewolf relies on it to leave out
+# (tools/kernel-config-check.zig): built in, code the module loader keeps
+# out today would be in every machine.
+KERNEL_CONFIG_CHECK = build/host/kernel-config-check
+$(BUILD)/vmlinuz: $(BUILD)/kernel/rootfs.tar $(KERNEL_CONFIG_CHECK)
 	rm -rf $(BUILD)/kernel/x
 	mkdir -p $(BUILD)/kernel/x
-	$(TAR) -xf $< -C $(BUILD)/kernel/x boot/vmlinuz-virt lib/modules
+	config=$$($(TAR) -tf $< | grep '^boot/config-') && \
+		$(TAR) -xf $< -C $(BUILD)/kernel/x boot/vmlinuz-virt lib/modules $$config && \
+		$(KERNEL_CONFIG_CHECK) $(BUILD)/kernel/x/$$config
 	cp $(BUILD)/kernel/x/boot/vmlinuz-virt $(BUILD)/vmlinuz
 	# On aarch64 Alpine ships an EFI zboot image: a PE whose payload is the
 	# gzipped Image, unpacked by its own EFI stub. QEMU understands it;
@@ -359,13 +409,13 @@ $(OUT)/modules.tar: $(BUILD)/vmlinuz $(MODULE_LISTS) $(ALLOW_FILES) Makefile
 
 # apko resolves `include:` against its working directory, and
 # build-minirootfs has no flag to change that, so it runs inside forms/.
-# Under DEV the form's own config serves: the lock's pins, passed as extra
-# packages, bring the shell.
+# Under DEV, busybox-full brings the shell: an extra package by default, or,
+# under FREEZE, pinned by the -dev lock ($(FORM_LOCK)) like the rest.
 $(OUT)/rootfs.tar: $(FORM_LOCK)
-	$(call apko_build,forms/$(FORM).yaml,$<)
+	$(call apko_build,forms/$(FORM).yaml,$<,$(if $(DEV),$(if $(FREEZE),,-p busybox-full)))
 
 # werewolf's own files: each form's folder along the chain, then meta.
-$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN)
+$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) $(SERVICE_CONFIG_BIN)
 	$(call layer,$(OVERLAY_DIRS) $(OUT)/meta)
 
 # Booted directly, the machine boots as a slot does, through stage0, onto
@@ -392,7 +442,9 @@ $(OUT)/initramfs.zst: $(OUT)/slot/initramfs.zst $(OUT)/slot/root.erofs
 # /run/runit, and apko's accounts, from which init seeds /run/werewolf
 # (the image's /etc/passwd, group and shadow link there). A layer of the
 # overlay, so the updater carries it forward too.
-$(OUT)/ro.stamp: $(OUT)/rootfs.tar $(shell find $(CHAIN_DIRS) -type d -path '*/etc/sv/*') Makefile
+# The etc/sv directories are prerequisites too: a service removed or renamed
+# changes nothing else Make can see, and its supervise link would stay.
+$(OUT)/ro.stamp: $(OUT)/rootfs.tar $(shell find $(CHAIN_DIRS) -type d \( -path '*/etc/sv' -o -path '*/etc/sv/*' \)) Makefile
 	rm -rf $(OUT)/ro && mkdir -p $(OUT)/ro/usr/share/werewolf/etc && \
 	for f in passwd group shadow; do \
 		$(TAR) -xOf $(OUT)/rootfs.tar etc/$$f > $(OUT)/ro/usr/share/werewolf/etc/$$f || exit 1; \
@@ -412,11 +464,14 @@ endef
 # A program is cmd/NAME/NAME.zig and the files beside it, and may import
 # lib/sandbox.zig as "sandbox", lib/broker.zig, the mount broker's client,
 # as "broker", lib/dm.zig, the device mapper, as "dm", lib/verity.zig,
-# dm-verity's hash tree, as "verity", and lib/seal.zig, what the seal's
-# programs share, as "seal", compiled with them, as ReleaseSafe as it is.
-ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep seal -Mroot=$(1) \
+# dm-verity's hash tree, as "verity", lib/seal.zig, what the seal's
+# programs share, as "seal", lib/settings.zig, a service's declared
+# settings, as "settings", and lib/update-policy.zig, when a staged update
+# boots, as "update-policy", compiled with them, as ReleaseSafe as it is.
+ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep seal --dep settings \
+	--dep update-policy -Mroot=$(1) \
 	-Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig -Mverity=lib/verity.zig \
-	-Mseal=lib/seal.zig
+	-Mseal=lib/seal.zig -Msettings=lib/settings.zig -Mupdate-policy=lib/update-policy.zig
 
 define zig_build
 $(zig_check)
@@ -431,6 +486,7 @@ endef
 $(foreach p,dhcp-client cloud-metadata mount mount-broker modload iface-up fence posture status-page slot-update $(SEAL_PROGRAMS) $(SHELLFREE),\
 	$(eval $(call program,$(p),$(PROGRAMS)/$(p)/usr/lib/werewolf/$(p))))
 $(eval $(call program,bite-cleanup,$(BITE_CLEANUP)))
+$(eval $(call program,service-config,$(SERVICE_CONFIG)))
 $(eval $(call program,pg-init,$(PG_INIT)))
 $(eval $(call program,init,$(INIT_BIN)))
 $(eval $(call program,stage0,$(STAGE0_BIN)))
@@ -445,7 +501,11 @@ test:
 	zig test lib/sandbox.zig
 	zig test lib/dm.zig
 	zig test lib/verity.zig
+	zig test lib/settings.zig
+	zig test lib/update-policy.zig
 	zig test boot/gpt.zig
+	zig test tools/cve-tiers.zig
+	zig test tools/kernel-config-check.zig
 	zig test cmd/popen-shim/popen-shim.zig -lc
 	for f in $(filter-out cmd/popen-shim/%,$(PROGRAM_SOURCES)); do zig test $(call ZIG_MODULES,$$f) || exit 1; done
 
@@ -464,7 +524,7 @@ endif
 # update in forms/prod rebuilds a slot as `make slot` does, from these.
 # In every image, in /usr/share/werewolf. Nothing here says when or where it
 # was built, so a rebuild matches.
-$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(MODULE_LISTS) $(NET_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) release/image.pub Makefile
+$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(MODULE_LISTS) $(NET_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) release/image.pub release/tiers.pub release/advisories Makefile $(SERVICE_CONFIG_BIN)
 	rm -rf $(OUT)/meta
 	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $$d $(OUT)/meta/etc/apk && \
 	kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
@@ -484,6 +544,8 @@ $(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar 
 	cp $(STAGE0_BIN) $$d/stage0.init && \
 	echo "$(FORM) $$kernel built-by-make" > $$d/release && \
 	cp release/image.pub $$d/image.pub && \
+	cp release/tiers.pub $$d/tiers.pub && echo $(TIERS_URL) > $$d/tiers && \
+	cp release/advisories $$d/advisories && \
 	$(if $(and $(filter $(FORM),$(RELEASE_FORMS)),$(if $(DEV),,y)),echo $(RELEASES_URL) > $$d/releases &&) \
 	$(TAR) -xOf $(OUT)/rootfs.tar etc/passwd > $(OUT)/passwd && \
 	awk -v pw=$(OUT)/passwd ' \
@@ -529,10 +591,40 @@ $(GPT_BIN): boot/gpt.zig
 	$(zig_check)
 	zig build-exe -O ReleaseSafe -femit-bin=$@ $<
 
+$(KERNEL_CONFIG_CHECK): tools/kernel-config-check.zig
+	$(zig_check)
+	zig build-exe -O ReleaseSafe -femit-bin=$@ $<
+
 VERITY_BIN = build/host/verity
 $(VERITY_BIN): tools/verity.zig lib/verity.zig
 	$(zig_check)
 	zig build-exe -O ReleaseSafe --dep verity -Mroot=$< -Mverity=lib/verity.zig -femit-bin=$@
+
+# The CVE tiers feed (docs/design/update-policy.md), which CI builds, signs
+# and publishes with release/tiers; here, for the kernel the lock pins, into
+# build/tiers/cve-tiers.json, unsigned. NVD's scores stay in build/tiers/nvd,
+# so a second run asks NVD only for what changed. The key never reaches the
+# command line make prints.
+CVE_TIERS_BIN = build/host/cve-tiers
+NVD_API_KEY_FILE ?= $(HOME)/.tok/werewolf-nvd
+.PHONY: cve-tiers
+$(CVE_TIERS_BIN): tools/cve-tiers.zig
+	$(zig_check)
+	zig build-exe -O ReleaseSafe -femit-bin=$@ $<
+
+cve-tiers: $(CVE_TIERS_BIN) $(LOCK)/kernel.lock.json
+	mkdir -p build/tiers && release/origins build/tiers/origins
+	@kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
+	NVD_API_KEY=$${NVD_API_KEY:-$$(cat $(NVD_API_KEY_FILE))} \
+	$(CVE_TIERS_BIN) "$$kernel" build/tiers/origins build/tiers/nvd build/tiers/in build/tiers/cve-tiers.json
+
+# The werewolf command (cmd/werewolf), built for this machine, not the image.
+WEREWOLF = build/host/werewolf
+.PHONY: werewolf
+werewolf: $(WEREWOLF)
+$(WEREWOLF): cmd/werewolf/werewolf.zig $(wildcard cmd/werewolf/*.zig) lib/settings.zig lib/update-policy.zig
+	$(zig_check)
+	zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$@
 
 disk: $(DISK)
 
@@ -584,27 +676,29 @@ $(OUT)/slot/initramfs.zst: $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $
 	zstd -19 -T0 -q -f -o $@ $(OUT)/stage0.cpio
 	rm $(OUT)/stage0.cpio
 
-# LZMA in 1 MiB clusters, with small files packed together and duplicates
-# kept once: the densest erofs makes, as small as the root as a zstd -19
-# tar, since direct boot holds it in RAM, and the one every common
-# mkfs.erofs can write (Homebrew's, Ubuntu's). zstd would read about five
-# times faster for about a fifth more size (prod: 8.2 MB, 0.08 s to read
-# every file cold, against LZMA's 6.8 MB and 0.42 s), but Homebrew's
-# erofs-utils is built without it; lz4hc was both larger and slower (13.0
-# MB, 1.0 s). werewolf reads its root mostly at startup, and then from the
-# page cache. A slot the updater builds on the machine is zstd: Wolfi's
-# mkfs.erofs has no LZMA. -b 4096 because mkfs.erofs
+# zstd in 64 KiB clusters, with small files packed together and duplicates
+# kept once: what a boot waits on least. Every file a boot first reads
+# costs at least a cluster's decompression, through dm-verity, before the
+# page cache holds it, and a boot first reads most of what it runs. Booted
+# under Lima (the lima form, 2 vCPUs), userland took 0.36 s, against 0.74 s
+# in LZMA's 1 MiB clusters (smaller LZMA clusters were no faster); lz4hc
+# was as fast and a quarter larger, and no compression no faster, at three
+# times the size (57 MB, against this 19.7 MB and LZMA's 12.4). The update
+# downloads the root as it is (docs/releases.md), so it stays compressed.
+# Level 9 writes it in 7 s and level 19 in 88 s for 2 MB less; zstd reads
+# as fast at any level. Homebrew's erofs-utils has no zstd, so
+# tools/install-deps builds one that has. -b 4096 because mkfs.erofs
 # otherwise takes the builder's page size, 16 KiB on Apple silicon, which a
 # 4 KiB-page kernel will not mount. -T0 dates every file and the image
 # 1970, and the UUID is fixed (stage0 finds the image by path), so a rebuild
-# matches. erofs-utils before 1.9 (Ubuntu 24.04 has 1.7.1) take
-# -Eall-fragments from a tar and write every file empty, without an error,
-# so older ones are refused, as are ones built without LZMA.
+# matches, on macOS as on Wolfi. erofs-utils before 1.9 (Ubuntu 24.04 has
+# 1.7.1) take -Eall-fragments from a tar and write every file empty,
+# without an error, so older ones are refused, as are ones without zstd.
 #
 # After the image, its dm-verity hash tree, which stage0 opens it through,
 # with the root hash and salt tools/verity writes to $(OUT)/verity/verity
 # for stage0's /verity (lib/verity.zig, the same tree veritysetup makes).
-EROFS_OPTS = -b 4096 -zlzma,level=109 -C1048576 -Eall-fragments,dedupe
+EROFS_OPTS = -b 4096 -zzstd,level=9 -C65536 -Eall-fragments,dedupe
 $(OUT)/slot/root.erofs: $(OUT)/rootfs.tar $(OUT)/overlay.tar $(VERITY_BIN)
 	mkdir -p $(dir $@)
 	@# The root directory itself, first: without an entry for it, mkfs.erofs
@@ -615,8 +709,8 @@ $(OUT)/slot/root.erofs: $(OUT)/rootfs.tar $(OUT)/overlay.tar $(VERITY_BIN)
 	rm -f $@
 	@v=$$(mkfs.erofs --version 2>/dev/null | sed -n 's/.*erofs-utils) *//p'); case $$v in '' | 1.[0-8] | 1.[0-8].*) \
 		echo "mkfs.erofs $${v:-before 1.9}: 1.9 or later is needed; older ones write an image of empty files" >&2; exit 1 ;; esac
-	@{ mkfs.erofs --version; mkfs.erofs --help; } 2>&1 | grep -q 'available compressors:.*lzma' || \
-		{ echo "mkfs.erofs has no LZMA: an erofs-utils built with liblzma is needed" >&2; exit 1; }
+	@{ mkfs.erofs --version; mkfs.erofs --help; } 2>&1 | grep -q 'available compressors:.*zstd' || \
+		{ echo "mkfs.erofs has no zstd: make install-deps builds an erofs-utils with it" >&2; exit 1; }
 	mkfs.erofs $(EROFS_OPTS) -T0 -U 00000000-0000-0000-0000-000000000000 --tar=f $@ $(OUT)/root.tar >/dev/null
 	rm $(OUT)/root.tar $(OUT)/root.mtree
 	mkdir -p $(OUT)/verity && $(VERITY_BIN) $@ $(OUT)/verity/verity
@@ -654,10 +748,14 @@ DIST_DIRECT = $(filter $(DIST_DIRECT_FORMS),$(FORM))
 # latest release's FORM-ARCH.json and files, which only a form built as it
 # ships follows, not a DEV=1 build.
 RELEASES_URL = https://github.com/werewolf-linux/werewolf/releases/latest/download/
+# Where every form's updater finds the CVE tiers feed, signed with the key
+# in release/tiers.pub (docs/design/update-policy.md).
+TIERS_URL = https://raw.githubusercontent.com/werewolf-linux/cve-feed/main/
 DIST = dist
 # What a release is built from: the build, the forms, the boot configs,
-# the programs, what they share, and the key the image trusts.
-RELEASE_SOURCES = Makefile forms boot cmd lib release/image.pub
+# the programs, what they share, the keys the image trusts, and werewolf's
+# own advisories, which the image carries.
+RELEASE_SOURCES = Makefile forms boot cmd lib release/image.pub release/tiers.pub release/advisories
 
 release-inputs:
 	for f in $(RELEASE_FORMS); do $(MAKE) --no-print-directory FORM=$$f relock || exit 1; done
@@ -669,12 +767,19 @@ release-inputs:
 	} > $(LOCK)/inputs
 	@echo "inputs: $$($(SHA256) < $(LOCK)/inputs | cut -c1-16), $$(grep -c '^https' $(LOCK)/inputs) packages"
 
+# FREEZE=1: a release pins to the versions release-inputs resolved and
+# digested above, so the two runners that build each architecture match byte
+# for byte (docs/releases.md) and the published image is reproducible. Dev and
+# CI builds stay unpinned (apko_build); only what is published is frozen.
 dist:
-	for f in $(RELEASE_FORMS); do $(MAKE) --no-print-directory FORM=$$f _dist-form || exit 1; done
+	for f in $(RELEASE_FORMS); do $(MAKE) --no-print-directory FREEZE=1 FORM=$$f _dist-form || exit 1; done
 
 _dist-form: $(if $(DIST_DIRECT),image $(OUT)/slot/cmdline,slot $(OUT)/disk.qcow2) $(OUT)/meta.stamp
+	@# A DEV=1 build has a root shell on its console (cmd/debug-shell): never one to publish.
+	@[ -z "$(DEV)" ] && [ ! -e $(OUT)/meta/usr/share/werewolf/dev ] || \
+		{ echo "dist: refused: $(FORM) is a DEV=1 build, with a root shell on its console" >&2; exit 1; }
 	release/manifest $(FORM) $(ARCH) $(OUT)/rootfs.tar $(OUT)/meta/usr/share/werewolf/kernel $(DIST) \
-		$(if $(DIST_DIRECT),vmlinuz=$(BUILD)/vmlinuz initramfs.zst=$(OUT)/initramfs.zst cmdline=$(OUT)/slot/cmdline,vmlinuz=$(OUT)/slot/vmlinuz stage0.zst=$(OUT)/slot/initramfs.zst root.erofs=$(OUT)/slot/root.erofs disk.qcow2=$(OUT)/disk.qcow2)
+		$(if $(DIST_DIRECT),vmlinuz=$(BUILD)/vmlinuz initramfs.zst=$(OUT)/initramfs.zst cmdline=$(OUT)/slot/cmdline,vmlinuz=$(OUT)/slot/vmlinuz stage0.zst=$(OUT)/slot/initramfs.zst root.erofs=$(OUT)/slot/root.erofs cmdline=$(OUT)/slot/cmdline disk.qcow2=$(OUT)/disk.qcow2)
 
 list-forms:
 	@for y in forms/*.yaml; do \
@@ -731,8 +836,8 @@ run: image $(BUILD)/data.img $(if $(wildcard config),config-tar)
 		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:8080-:$(RUN_PORT) -device virtio-net-pci,netdev=n0 \
 		-device virtio-rng-pci -drive file=$(BUILD)/data.img,format=raw,if=virtio $(QEMU_CONFIG)
 
-# No host key to check: the machine makes a new one each boot, and this
-# reaches only the port `run` forwards on this host's loopback.
+# No host key to check: this reaches only the port `run` forwards on this
+# host's loopback (the machine keeps its key in /data, which run's disk holds).
 run-ssh:
 	ssh -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@127.0.0.1
 
@@ -782,7 +887,7 @@ export POSTURE_KNOWN = $(shell awk -v b=$(if $(DEV),dev,*) -v f=$(FORM) -v a=$(A
 export POSTURE_KNOWN_NATIVE = files-root-readonly files-nosuid-everywhere files-noexec-everywhere files-nodev-everywhere files-memfd-exec files-links files-system-writes processes-mem-attack network-no-login programs-no-shell programs-no-downloaders programs-no-interpreters
 CHECK_CMDLINE = $(CHECK_BOOT) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3
 # What every form shares, built once before the forms build side by side.
-CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(DHCP) $(CLOUD) $(BITE_CLEANUP) $(PG_INIT) $(PG_SHIM) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(PROGRAMS)/slot-update/usr/lib/werewolf/slot-update
+CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(DHCP) $(CLOUD) $(BITE_CLEANUP) $(PG_INIT) $(PG_SHIM) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(PROGRAMS)/slot-update/usr/lib/werewolf/slot-update $(SERVICE_CONFIG)
 # minimal has no updater, which would fetch from the network once committed.
 CHECK_SLOT_FORM = minimal
 VICTIM_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec
@@ -857,7 +962,7 @@ check-%: | $(CHECK_SHARED)
 		{ tail -n 20 $(CHECK)/$*-build.log; echo "FAIL   $* build: see $(CHECK)/$*-build.log"; exit 1; }
 	@$(CHECK_MAKE) FORM=$* _check-form
 
-_check-form:
+_check-form: $(WEREWOLF)
 	@rm -f $(CHECK)/$(FORM).img && dd if=/dev/zero of=$(CHECK)/$(FORM).img bs=1048576 count=0 seek=1024 status=none
 	@rm -rf $(CHECK)/$(FORM)-config && mkdir -p $(CHECK)/$(FORM)-config && \
 		head -c 64 /dev/zero | tr '\0' k >$(CHECK)/$(FORM)-config/data.key && \
@@ -865,16 +970,31 @@ _check-form:
 			ssh-keygen -q -t ed25519 -N '' -C werewolf-check -f $(CHECK)/$(FORM)-key && \
 			cp $(CHECK)/$(FORM)-key.pub $(CHECK)/$(FORM)-config/authorized_keys &&) \
 		$(if $(filter bastion,$(FORM)),mkdir -p $(CHECK)/$(FORM)-config/bastion && \
-			ssh-keygen -q -t ed25519 -N '' -f $(CHECK)/$(FORM)-config/bastion/host_key && \
 			cp $(CHECK)/$(FORM)-key.pub $(CHECK)/$(FORM)-config/bastion/authorized_keys &&) \
 		$(if $(filter tailscale,$(FORM)),mkdir -p $(CHECK)/$(FORM)-config/tailscale && \
 			printf '%s\n' tskey-auth-offline-test >$(CHECK)/$(FORM)-config/tailscale/auth_key &&) \
-		COPYFILE_DISABLE=1 $(TAR) --uid 0 --gid 0 --numeric-owner -cf $(CHECK)/$(FORM)-config.tar -C $(CHECK)/$(FORM)-config .
+		$(WEREWOLF) pack $(FORM) -o $(CHECK)/$(FORM)-config.tar --config $(CHECK)/$(FORM)-config >/dev/null
 	@awk '$(if $(filter tailscale,$(FORM)),$$2 != "listeners",1)' test/checks $(wildcard test/checks-$(FORM)) >$(CHECK)/$(FORM)-checks
 	@SSH_MODE=$(FORM) SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key test/boot $(FORM) $(CHECK)/$(FORM)-checks $(CHECK)/$(FORM).log $(CHECK_FORM_QEMU)
 	@SSH_MODE=$(FORM) SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key test/boot $(FORM)-again test/checks-again $(CHECK)/$(FORM)-again.log $(CHECK_FORM_QEMU)
 	@! grep -a -E 'werewolf: (formatting|making LUKS2) ' $(CHECK)/$(FORM)-again.log || \
 		{ echo "FAIL   $(FORM)-again        formatted the disk its first boot left"; exit 1; }
+	@# An ssh host key made and kept on the first boot is the one the second
+	@# offers (sshd-start, ssh-host-key); a form whose /data is RAM keeps none.
+	@a=$$(grep -a '"event":"host-key"' $(CHECK)/$(FORM).log | grep -a 'kept in /data' | \
+		grep -ao '"fingerprint":"[^"]*"' | head -n 1); \
+	b=$$(grep -a '"event":"host-key"' $(CHECK)/$(FORM)-again.log | grep -ao '"fingerprint":"[^"]*"' | head -n 1); \
+	[ -z "$$a" ] || [ "$$a" = "$$b" ] || \
+		{ echo "FAIL   $(FORM)-again        host key not kept: [$$a] then [$$b]"; exit 1; }
+	@$(if $(filter bastion,$(FORM)),$(CHECK_MAKE) FORM=bastion _check-bastion-config,:)
+
+.PHONY: _check-bastion-config
+# The tar, this time, as a user makes one: werewolf pack, from the same
+# files and a destination on the line.
+_check-bastion-config: $(WEREWOLF)
+	@$(WEREWOLF) pack bastion -o $(CHECK)/bastion-config.tar --config $(CHECK)/bastion-config \
+		--destinations 127.0.0.1:22 >/dev/null
+	@SSH_MODE=bastion-config SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/bastion-key test/boot bastion-config test/checks-bastion-config $(CHECK)/bastion-config.log $(CHECK_FORM_QEMU)
 
 # The forms released without a shell, booted as they ship, without DEV:
 # test/boot judges the machine by its posture line, which must find no
@@ -1022,8 +1142,8 @@ _check-dist-disk:
 check-gcp:
 	@$(MAKE) --no-print-directory FORM=prod-ssh _check-gcp
 
-_check-gcp: $(OUT)/disk.qcow2
-	@test/gcp check $(OUT)/disk.qcow2 $(ARCH)
+_check-gcp: $(WEREWOLF)
+	@test/gcp check $(FORM) $(ARCH)
 
 # prod's LUKS2 disk, as its own check left it, booted with no data.key:
 # it must refuse the disk, not format it again. After prod's own check,
@@ -1160,6 +1280,12 @@ CHECK_UPDATE = $(CHECK)/update-$(FORM)
 check-updater: | $(CHECK_SHARED)
 	@$(MAKE) --no-print-directory FORM=prod DEV=1 _check-updater
 
+# The same update, with the machine's power cut once the update is staged
+# and before it is due: whatever ends a boot, a staged slot is armed, and
+# the next boot is the update's (test/update, STAGED).
+check-updater-staged: | $(CHECK_SHARED)
+	@$(MAKE) --no-print-directory FORM=prod DEV=1 STAGED=1 _check-updater
+
 check-updater-release: | $(CHECK_SHARED)
 	@$(MAKE) --no-print-directory FORM=prod-ssh _check-updater
 
@@ -1192,8 +1318,8 @@ _check-updater-boot:
 	@cp $(OUT)/slot/vmlinuz $(CHECK_UPDATE)/
 	@(cd $(CHECK_UPDATE)/verity && $(TAR) -cf - --format newc --uid 0 --gid 0 --numeric-owner verity) | \
 		zstd -q -c | cat $(OUT)/slot/initramfs.zst - >$(CHECK_UPDATE)/initramfs.zst
-	@test/update $(CHECK_UPDATE) \
-		"console=$(CONSOLE) panic=1 $$(cat $(OUT)/slot/cmdline) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3 init=/init werewolf.victim=$(VICTIM_UUID):/var/lib/werewolf werewolf.grubenv=$(VICTIM_UUID):/boot/grub/grubenv" \
+	@STAGED='$(STAGED)' test/update $(CHECK_UPDATE) \
+		"console=$(CONSOLE) panic=1 $$(cat $(OUT)/slot/cmdline) $(SEAL_ARGS) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3 init=/init werewolf.victim=$(VICTIM_UUID):/var/lib/werewolf werewolf.grubenv=$(VICTIM_UUID):/boot/grub/grubenv" \
 		$(QEMU) -smp 2 -m 2048 -no-reboot -device virtio-rng-pci -netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile=
 
 # The CI job, here: in an Ubuntu VM like GitHub's runners, with nested
@@ -1222,15 +1348,12 @@ lima-delete:
 	limactl stop -f werewolf
 	limactl delete werewolf
 
-# The demo form's boot disk in Lima, booted by its own systemd-boot and
-# reached over vzNAT, since Lima cannot forward a port to a guest without
-# ssh. The disk names vzNAT's MAC, fixed in test/lima-demo, so DHCP runs
-# there. Its URL is printed at the end. See docs/demo.md.
-DEMO_MAC = 52:55:55:57:e1:f0
-demo:
-	@$(MAKE) --no-print-directory FORM=demo disk DISK=build/$(ARCH)/demo/lima.img \
-		DISK_ARGS="werewolf.mac=$(DEMO_MAC) console=$(LIMA_CONSOLE)"
-	test/lima-demo build/$(ARCH)/demo/lima.img
+# The demo form in Lima, made with werewolf create: its own boot disk,
+# booted by its own systemd-boot and reached over vzNAT, since Lima cannot
+# forward a port to a guest without ssh. Its URL is printed at the end.
+# See docs/demo.md.
+demo: $(WEREWOLF)
+	test/lima-demo
 
 # webshell-demo: boot the webshell-example form (docs/forms.md) under QEMU,
 # as it ships -- no shell -- with its port on this host's 127.0.0.1:8080,
@@ -1246,29 +1369,27 @@ _webshell-demo: image $(BUILD)/data.img $(if $(wildcard config),config-tar)
 		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:8080-:8080 -device virtio-net-pci,netdev=n0 \
 		-device virtio-rng-pci -drive file=$(BUILD)/data.img,format=raw,if=virtio $(QEMU_CONFIG)
 
-demo-delete:
+demo-delete: $(WEREWOLF)
 	test/lima-demo delete
 
 # The demo on Google Compute Engine (test/gcp): its disk as a release
 # makes one, imported as an image and booted on a VM that stays, reached
 # over HTTP. Needs gcloud, logged in, with a project; the VM costs what an
 # e2-medium or t2a-standard-1 costs until demo-gcp-delete.
-demo-gcp:
-	@$(MAKE) --no-print-directory FORM=demo build/$(ARCH)/demo/disk.qcow2
-	test/gcp demo build/$(ARCH)/demo/disk.qcow2 $(ARCH)
+demo-gcp: $(WEREWOLF)
+	test/gcp demo demo $(ARCH)
 
-demo-gcp-delete:
+demo-gcp-delete: $(WEREWOLF)
 	test/gcp demo-delete
 
 # The webshell-example form on Google Compute Engine (test/gcp), the same
 # way: a vulnerable web app on a real VM on the Internet, reached at
 # http://ADDR:8080, to attack from anywhere and watch it hold. The VM costs
 # what an e2-small or t2a-standard-1 costs until webshell-gcp-delete.
-webshell-gcp:
-	@$(MAKE) --no-print-directory FORM=webshell-example build/$(ARCH)/webshell-example/disk.qcow2
-	test/gcp webshell build/$(ARCH)/webshell-example/disk.qcow2 $(ARCH)
+webshell-gcp: $(WEREWOLF)
+	test/gcp webshell webshell-example $(ARCH)
 
-webshell-gcp-delete:
+webshell-gcp-delete: $(WEREWOLF)
 	test/gcp webshell-delete
 
 # The locks stay: they are what makes the next build the same as the last.

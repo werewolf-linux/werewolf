@@ -3,6 +3,10 @@
 # prod.modules. And the root itself: erofs, on a loop device, through
 # dm-verity, which stage0 mounts read-only in every form.
 virtio_net virtio_blk sr_mod isofs evdev button erofs loop dm-verity
+# arm64's power button, where a device tree wires it to a PL061 GPIO line
+# (QEMU's virt, Apple's VZ): the controller, whose line power-button reads,
+# since linux-virt has no gpio-keys driver to make it a key.
+aarch64: gpio-pl061
 # The victim's filesystem bite leaves behind: ext4 (Debian, Ubuntu, and
 # werewolf's own disk), xfs (Rocky), btrfs (Fedora). btrfs asks the crypto
 # API for its checksum at mount time, after the loader is closed, so crc32c

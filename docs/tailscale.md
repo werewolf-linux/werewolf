@@ -1,73 +1,117 @@
 # Tailscale subnet router
 
-`tailscale` inherits `prod` and runs as its own unprivileged user. It uses
-userspace networking: no TUN device, kernel IP forwarding or permission to
-change the host firewall. Tailscale SSH and the web client are disabled.
+Give allowed tailnet clients access to a subnet using [the Tailscale form](../forms/tailscale.yaml).
+See its [security precautions](../examples/tailscale/README.md#security-precautions).
+The image supplies the network and service restrictions; boot configuration
+supplies routes and enrollment credentials.
 
-## Configure it
-
-Create `forms/my-router.yaml`:
-
-```yaml
-include: tailscale.yaml
-```
-
-Copy the base configuration into your overlay:
+Run these commands from the repository root:
 
 ```sh
-mkdir -p forms/my-router/etc/tailscale
-cp forms/tailscale/etc/tailscale/config.json forms/my-router/etc/tailscale/config.json
+export FORM=tailscale VM=werewolf-router
+export CONFIG_DIR="$PWD/config/router-vm"
+umask 077
+mkdir -p "$CONFIG_DIR/tailscale"
 ```
 
-Set `advertiseRoutes` to the subnet you want to reach, for example
-`["10.20.0.0/24"]`. The default is empty. Keep the other settings, including
-`locked`, unchanged. Do not advertise default routes: this is a subnet
-router, not an exit node.
+## Routes and enrollment
 
-Create a tagged, preauthorized auth key in your tailnet and put its value
-in `config/tailscale/auth_key` (use a single-use key for one machine).
-Keep that directory private and the file mode `0600`; do not put the key
-in the form or image. Leash supplies a private copy to the daemon.
+Create `$CONFIG_DIR/tailscale/settings.json`:
+
+```json
+{"routes": ["10.20.0.0/24"]}
+```
+
+Use a subnet reachable from the VM: your LAN for Lima, or your VPC for GCP.
+For a meaningful routing test, use a client outside that subnet. Empty
+`routes` advertises nothing. The renderer accepts up to 32 IPv4/IPv6 network
+CIDRs, rejects host bits and default routes, and rejects all other fields.
+It merges only `advertiseRoutes` into the image's Tailscale configuration.
+Boot settings cannot enable SSH, alter the auth-key source or change the
+service's privileges or ports. Omitted routes retain the image's empty list.
+
+In your tailnet policy, define a router tag and a narrow grant. For example:
+
+```json
+{
+  "tagOwners": {"tag:subnet-router": ["autogroup:admin"]},
+  "grants": [{
+    "src": ["you@example.com"],
+    "dst": ["10.20.0.0/24"],
+    "ip": ["tcp:22", "tcp:443"]
+  }]
+}
+```
+
+Use your own identity/subnet and merge carefully with your existing policy.
+Grants are additive; review any existing allow-all rule. Create a tagged,
+preauthorized, non-ephemeral [auth key](https://tailscale.com/docs/features/access-control/auth-keys)
+for `tag:subnet-router`. Use a single-use key for one VM. Paste it into
+`$CONFIG_DIR/tailscale/auth_key` with your editor, then:
 
 ```sh
-make FORM=my-router run
+chmod 600 "$CONFIG_DIR/tailscale/auth_key"
 ```
 
-Approve the advertised routes in the Tailscale admin console, and grant
-only the intended clients access to the subnet and ports. Advertising and
-approving a route does not replace access policy. Linux clients also need
-route acceptance enabled. See [Tailscale's subnet-router setup](https://tailscale.com/docs/features/subnet-routers).
+Use a fresh key for a second VM, including when moving from Lima to GCP.
+Leash supplies a private copy to the daemon. The key is required at service
+start; preserve the file even after enrollment. Persist `/data`: the node
+identity is in `/data/svc/tailscale`. Never clone that identity to another
+router. Auth-key expiration does not itself revoke an enrolled node.
 
-From an allowed client, test SSH or HTTPS to a machine in the subnet;
-also check that a client without a grant cannot connect.
+## Local Lima
 
-## Network limits
+Follow [the Lima steps](service-vms.md#local-lima-vm). Your settings and auth
+key travel on the VM's config disk. After the router appears in the
+Tailscale admin console, approve its advertised subnet. Route approval and
+client grants are separate requirements.
 
-The initial policy allows TCP 22 and 443 to destinations, plus DNS for
-bootstrap. For another TCP port, copy the base service file into your
-overlay, add the port to `connect`, and add
-`connect tailscale tcp/PORT` to `forms/my-router.net`. The host policy
-limits user and port, not destination CIDR; tailnet policy supplies the
-client and subnet restrictions.
+On a Linux client, enable route acceptance:
 
-No public inbound rule is required. Direct UDP transport is blocked, so
-connections use DERP relays over HTTPS. This trades direct-path performance
-for a smaller network policy. This form is not a general-purpose UDP or
-ICMP router. With userspace forwarding, destinations see the router's
-address, not the original client's. See [userspace routing](https://tailscale.com/docs/reference/kernel-vs-userspace-routers).
+```sh
+sudo tailscale set --accept-routes=true
+```
 
-## Deploy and update
+From an allowed tailnet client outside the subnet, test a real destination:
 
-Build a boot disk with `make FORM=my-router disk` and supply the config
-through a config disk or [cloud metadata](cloud.md). Protect access to that
-metadata. Persist `/data`: the node identity lives in
-`/data/svc/tailscale`. Treat it as a secret and never clone it to another
-router. Enrollment keys and node-key expiry are separate tailnet settings.
+```sh
+ssh destination-user@10.20.0.10
+curl -f https://YOUR_SUBNET_HTTPS_HOST/health
+```
 
-The form declares the desired configuration; the running machine does not
-need manual edits. Tailscale's own updater is disabled. On an A/B
-installation, Werewolf updates the packages with the image while keeping
-the node's data. Changes to routes or policy files need a new deployment.
-The [Tailscale configuration schema](https://tailscale.com/docs/reference/tailscaled/tailscaled-config-file)
-is currently `alpha0`; check it when upgrading. See [releases.md](releases.md)
-for Werewolf's update model.
+Use a hostname resolving to the advertised subnet and its valid TLS
+certificate. Confirm that a client without a grant cannot connect. Use the
+admin console and boot log to check the router; it has no login SSH server.
+See [Tailscale's subnet-router setup](https://tailscale.com/docs/features/subnet-routers).
+
+## GCP
+
+Follow [the GCP steps](service-vms.md#gcp-vm) with a fresh auth key. They send
+these same files as a base64 config tar in instance metadata. Advertise the
+selected VPC subnet and approve this new node's routes in the tailnet.
+
+No public inbound firewall rule is needed. Permit outbound DNS/HTTPS, and
+allow the subnet destination's application ports from the router's internal
+IP. Repeat the client tests above. Destinations see the router's address
+because userspace networking proxies the connections.
+
+The initial policy permits TCP 22 and 443, plus DNS. Direct UDP transport
+is blocked, so tailnet connections use DERP relays over HTTPS. This form is
+not a general UDP/ICMP router. To add a TCP application port, use a
+descendant form and add it to both the service's `connect` directive and
+`connect tailscale tcp/PORT` in its `.net` file. Host policy limits ports;
+tailnet grants limit clients and subnet destinations.
+
+## Configuration and updates
+
+Declare routes in the source settings file and refresh the boot config
+using [these instructions](service-vms.md#change-boot-configuration). The generated
+runtime configuration is replaced on every start.
+
+Werewolf updates Tailscale with the image; Tailscale's own updater is
+disabled. Native A/B updates keep the node's data and reread boot settings.
+Policy/port changes need a new image. Both slots share data; rollback does
+not undo routes or credentials supplied at boot. The image uses Tailscale's
+`alpha0` configuration schema; check [schema changes](https://tailscale.com/docs/reference/tailscaled/tailscaled-config-file)
+when upgrading. Remove retired test nodes from the tailnet after deleting
+their VMs.

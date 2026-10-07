@@ -23,16 +23,24 @@ user and group. Python, Node.js and JRE inherit it through their runtime
 forms; Go, Rust and ASP.NET Core inherit it directly. PHP keeps distinct `php` and
 `nginx` service accounts for its two services in the same VM.
 
+## Service forms
+
+The [SSH bastion](bastion/README.md) and [Tailscale subnet router](tailscale/README.md)
+have security notes and tutorials for local Lima and GCP. Destinations,
+routes and credentials come from restricted boot configuration; the image
+keeps the accounts, service permissions and network ports fixed.
+
 ## Build host
 
 Work from a clone of this repository. The applications run on Linux; the
 images can be built on macOS or Linux. Install the repository's build tools
 first: apko, Zig **0.17.0**, zstd, libarchive's bsdtar, erofs-utils **1.9 or
-newer**, QEMU, mtools and e2fsprogs. The pinned CI setup is in
+newer, with zstd**, QEMU, mtools and e2fsprogs. The pinned CI setup is in
 [test/ci-setup](../test/ci-setup). On macOS:
 
 ```sh
-brew install apko zig zstd libarchive erofs-utils qemu mtools e2fsprogs
+brew install apko zig zstd libarchive qemu mtools e2fsprogs
+make install-deps  # builds erofs-utils with zstd: Homebrew's has none
 zig version  # must match the version above
 ```
 
@@ -58,6 +66,23 @@ Neither compiler goes into the image. `RUSTC` can override
 ASP.NET Core needs the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 on the host. It publishes for Linux using the selected architecture; the VM
 contains the packaged runtime, not the SDK.
+
+## With werewolf
+
+Each tutorial's form is an ordinary form, so the `werewolf` command runs it
+as it runs any other, from the repository root (`make werewolf` builds it):
+
+```sh
+build/host/werewolf create example-python web            # Lima on a Mac, else QEMU here
+build/host/werewolf create example-python web --on gcp   # Google Compute Engine
+build/host/werewolf create python web --app ./myapp      # your own app, on the python form
+```
+
+It prints the VM's address; the application answers on :8080 (PHP on :80).
+`werewolf delete web` removes it. The Python tutorial's form takes a
+setting, `--greeting TEXT`, as an example of handing an application
+per-machine values ([docs/forms.md](../docs/forms.md#without-a-form---app)).
+The Makefiles below do the same for QEMU and GCP step by step.
 
 ## What the Makefiles do
 

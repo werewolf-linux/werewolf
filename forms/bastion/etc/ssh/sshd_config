@@ -1,7 +1,7 @@
 # This form does not include the interactive-login configuration in minimal.
 Port 22
 AddressFamily inet
-HostKey /run/svc/sshd/host-key
+HostKey /data/svc/sshd/host-key
 PidFile /run/svc/sshd/sshd.pid
 AuthorizedKeysFile /run/svc/sshd/authorized-keys
 AllowUsers bastion
@@ -18,7 +18,8 @@ HostKeyAlgorithms ssh-ed25519
 PubkeyAcceptedAlgorithms ssh-ed25519,sk-ssh-ed25519@openssh.com
 MACs -*sha1*,umac-64*
 AllowTcpForwarding local
-Include /etc/ssh/bastion-destinations.conf
+Include /run/svc/sshd/destinations
+PermitOpen none
 PermitListen none
 AllowStreamLocalForwarding no
 AllowAgentForwarding no

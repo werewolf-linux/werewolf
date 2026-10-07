@@ -30,19 +30,25 @@
 //!   nothing is loaded.
 //! - Every file is opened beneath the module directory with symlinks
 //!   refused (openat2), all of them before it pledges.
-//! - Then it pledges: no_new_privs, every capability dropped but
-//!   CAP_SYS_MODULE, and a seccomp filter of finit_module, read, write,
-//!   close and exit. Anything else kills it.
+//! - Then it pledges (lib/sandbox.zig): every capability but
+//!   CAP_SYS_MODULE gone, from the bounding set too, never to come back,
+//!   and a seccomp filter of finit_module, read, write, close and exit.
+//!   Anything else, or another architecture's call, kills it.
 //! - No arguments, no environment; one line on the console for what it
 //!   did, and one for each module the kernel refused, with the kernel's
-//!   reason.
+//!   reason, as for any call that fails.
+//!
+//! Should closing the loader fail, init boots on, as it cannot tell that
+//! from a driver refused; the seal then takes CAP_SYS_MODULE from every
+//! process, and refuses init_module and finit_module to all, and posture's
+//! kernel-modules-closed checks the setting on every boot.
 //!
 //! There is no privilege separation: nothing it reads comes from outside
 //! the image, and the one judgement that matters is the kernel's.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const linux = std.os.linux;
+const sandbox = @import("sandbox");
 
 const max_modules = 256;
 const max_list = 64 << 10;
@@ -165,6 +171,7 @@ fn describe(err: anyerror) []const u8 {
         error.Unenforced => "refused: the kernel would load unsigned modules (no lockdown, no " ++
             "module.sig_enforce)",
         error.BadPath, error.TooMany => "refused: werewolf.modules is not a clean list",
+        error.SystemCall => sandbox.errnoName(sandbox.failed_errno),
         else => @errorName(err),
     };
 }
@@ -278,7 +285,7 @@ fn openat2(dir: i32, path: [:0]const u8, flags: u64, resolve: u64) !i32 {
         @intFromPtr(&how),
         @sizeOf(OpenHow),
     );
-    try sys(rc);
+    _ = try sandbox.sys(rc, "openat2");
     return @intCast(rc);
 }
 
@@ -299,8 +306,7 @@ fn readAll(fd: i32, buf: []u8) ![]const u8 {
     var n: usize = 0;
     while (true) {
         if (n == buf.len) return error.TooLarge;
-        const rc = linux.read(fd, buf[n..].ptr, buf.len - n);
-        try sys(rc);
+        const rc = try sandbox.sys(linux.read(fd, buf[n..].ptr, buf.len - n), "read");
         if (rc == 0) return buf[0..n];
         n += rc;
     }
@@ -312,80 +318,19 @@ fn close(fd: i32) void {
 
 // --- pledge ----------------------------------------------------------------------
 
-const PR_SET_NO_NEW_PRIVS = 38;
 const CAP_SYS_MODULE = 16;
-const LINUX_CAPABILITY_VERSION_3 = 0x20080522;
-const SECCOMP_SET_MODE_FILTER = 1;
-const SECCOMP_RET_ALLOW: u32 = 0x7fff0000;
-const SECCOMP_RET_KILL_PROCESS: u32 = 0x80000000;
 
-/// The kernel's __user_cap_header_struct, whose pid is an int; Zig 0.17's
-/// cap_user_header_t has it as a usize (see cmd/mount/mount.zig).
-const CapHeader = extern struct { version: u32, pid: i32 };
-const CapSets = extern struct { effective: u32, permitted: u32, inheritable: u32 };
-
-const allowed_syscalls = [_]linux.SYS{ .finit_module, .read, .write, .close, .exit, .exit_group };
-
-const audit_arch: u32 = switch (builtin.cpu.arch) {
-    .aarch64 => 0xc00000b7,
-    .x86_64 => 0xc000003e,
-    else => @compileError("modules runs on aarch64 and x86_64"),
-};
-
-const Filter = extern struct { code: u16, jt: u8, jf: u8, k: u32 };
-const LD_W_ABS = 0x20;
-const JEQ_K = 0x15;
-const JGE_K = 0x35;
-const RET_K = 0x06;
-
-const filter = blk: {
-    const n = allowed_syscalls.len;
-    var f: [5 + n + 1]Filter = undefined;
-    f[0] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 4 }; // arch
-    f[1] = .{ .code = JEQ_K, .jt = 1, .jf = 0, .k = audit_arch };
-    f[2] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
-    f[3] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 0 }; // nr
-    f[4] = .{ .code = JGE_K, .jt = @intCast(n), .jf = 0, .k = 0x40000000 }; // x32
-    for (allowed_syscalls, 0..) |s, j| f[5 + j] = .{
-        .code = JEQ_K,
-        .jt = @intCast(n - j),
-        .jf = 0,
-        .k = @intCast(@backingInt(s)),
-    };
-    f[5 + n] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
-    break :blk f ++ [_]Filter{.{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_ALLOW }};
-};
-
+/// CAP_SYS_MODULE alone, never to gain more, and a filter of what loading
+/// and closing take.
 fn pledge() !void {
-    try sys(linux.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
-    const header: CapHeader = .{ .version = LINUX_CAPABILITY_VERSION_3, .pid = 0 };
-    const keep: u32 = 1 << CAP_SYS_MODULE;
-    const data = [2]CapSets{
-        .{ .effective = keep, .permitted = keep, .inheritable = 0 },
-        .{ .effective = 0, .permitted = 0, .inheritable = 0 },
-    };
-    try sys(linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&data)));
-    const prog = extern struct {
-        len: u16,
-        filter: [*]const Filter,
-    }{ .len = filter.len, .filter = &filter };
-    try sys(linux.seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog));
+    try sandbox.keepOnly(1 << CAP_SYS_MODULE);
+    var f: sandbox.Filter = .{};
+    inline for (.{ "finit_module", "read", "write", "close", "exit", "exit_group" }) |name|
+        f.allow(name);
+    try f.install();
 }
 
 // --- saying so -------------------------------------------------------------------
-
-fn sys(rc: usize) !void {
-    return switch (linux.errno(rc)) {
-        .SUCCESS => {},
-        .PERM => error.PermissionDenied,
-        .ACCES => error.AccessDenied,
-        .NOENT => error.NoSuchFileOrDirectory,
-        .LOOP => error.SymlinkInPath,
-        .XDEV => error.OutsideModuleDirectory,
-        .INVAL => error.InvalidArgument,
-        else => error.Failed,
-    };
-}
 
 fn say(comptime format: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
@@ -394,7 +339,13 @@ fn say(comptime format: []const u8, args: anytype) void {
 }
 
 fn fail(what: []const u8, err: anyerror) noreturn {
-    say("modload: {s}: {s}\n", .{ what, @errorName(err) });
+    if (err == error.SystemCall)
+        say(
+            "modload: {s}: {s}: {s}\n",
+            .{ what, sandbox.failed, sandbox.errnoName(sandbox.failed_errno) },
+        )
+    else
+        say("modload: {s}: {s}\n", .{ what, @errorName(err) });
     linux.exit_group(1);
 }
 
@@ -450,10 +401,4 @@ test "too many modules refuses the list" {
     defer text.deinit(testing.allocator);
     for (0..max_modules + 1) |_| try text.appendSlice(testing.allocator, "kernel/x.ko\n");
     try testing.expectError(error.TooMany, parse(text.items, &lines, &mods));
-}
-
-test "the pledge's pieces are the kernel's" {
-    try testing.expectEqual(8, @sizeOf(CapHeader));
-    try testing.expectEqual(filter.len - 1, 5 + 0 + 1 + filter[5].jt);
-    try testing.expectEqual(SECCOMP_RET_ALLOW, filter[filter.len - 1].k);
 }

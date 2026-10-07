@@ -70,8 +70,10 @@ pub fn main(init: std.process.Init) !void {
     // Every module the form needs, then the loader closes for good: the
     // root that follows finds it closed and loads nothing.
     if (!run(io, &.{"/usr/lib/werewolf/modload"})) say("not every module loaded; see above", .{});
+    const modules_ms = bootMs();
 
     var img: [:0]const u8 = "/root.erofs";
+    var slot_ms: u64 = 0;
     if (boot.slot.len > 0) {
         const found = findFilesystem(gpa, boot.uuid) orelse fail("no filesystem {s}", .{boot.uuid});
         mkdir("/victim");
@@ -91,6 +93,7 @@ pub fn main(init: std.process.Init) !void {
             .{ boot.dir, boot.slot },
             0,
         );
+        slot_ms = bootMs();
     }
     // Read-only, and nothing over it: no overlay to write into. The image,
     // a file in a slot's filesystem or in this initramfs, goes through a
@@ -118,6 +121,7 @@ pub fn main(init: std.process.Init) !void {
         "cannot mount {s}: {s}",
         .{ img, @tagName(linux.errno(rc)) },
     );
+    const root_ms = bootMs();
     if (boot.slot.len > 0)
         say(
             "slot {s}: {s}, read-only, verified (root hash {x}…), is the root",
@@ -158,7 +162,16 @@ pub fn main(init: std.process.Init) !void {
     _ = linux.chdir("/");
     say("the kernel took {d}.{d:0>3}s", .{ kernel_ms / 1000, kernel_ms % 1000 });
     var env = try init.environ_map.clone(gpa);
-    try env.put("WEREWOLF_KERNEL_MS", try gpa.print("{d}", .{kernel_ms}));
+    // Where the time went, each phase and when it ended, for init to add
+    // its own to: the kernel, the modules, the slot's filesystem found and
+    // mounted, and the root opened through dm-verity.
+    try env.put("WEREWOLF_BOOT", if (slot_ms > 0)
+        try gpa.print(
+            "kernel={d} modules={d} slot={d} root={d}",
+            .{ kernel_ms, modules_ms, slot_ms, root_ms },
+        )
+    else
+        try gpa.print("kernel={d} modules={d} root={d}", .{ kernel_ms, modules_ms, root_ms }));
     const err = std.process.replace(io, .{ .argv = &.{"/init"}, .environ_map = &env });
     fail("cannot start /init: {s}", .{@errorName(err)});
 }
@@ -248,6 +261,10 @@ fn loopDevice(gpa: std.mem.Allocator, file: [:0]const u8) !struct { path: [:0]co
     const backing = linux.open(file, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(backing) != .SUCCESS) return error.NoImage;
     defer _ = linux.close(@intCast(backing));
+    // The whole image, data and hash tree, read into the page cache in the
+    // background from now: the boot reads most of it, and a cloud's network
+    // disk answers a few large reads far sooner than hundreds of small ones.
+    _ = linux.fadvise(@intCast(backing), 0, 0, linux.POSIX_FADV.WILLNEED);
 
     var cfg: LoopConfig = .{
         .fd = @intCast(backing),
