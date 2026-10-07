@@ -185,8 +185,8 @@ to `prod-ssh`).
   the one run it gets. Choosing means opening the loader twice, which gives
   up the run-once design; until a way keeps it, every boot loads all four.
 
-- **`/run/config/NAME`.** leash's design gives each service its part of the
-  config; it is not built yet, and the runtime forms need it.
+- **Service configuration.** Built as explicit `config NAME PATH` copies,
+  not access to `/run/config/NAME`; see [forms.md](../forms.md#private-configuration-files).
 - **Which forms are published.** Today `minimal`, `prod` and `prod-ssh`.
   With the runtime forms, perhaps all of them, each with `SSH=1`.
 

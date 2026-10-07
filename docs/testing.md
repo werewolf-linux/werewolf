@@ -106,8 +106,10 @@ The slot boot covers what direct boot cannot: stage0 finding `root.erofs`
 by filesystem UUID, `/victim` read-only, the `slot-keep`
 service making the slot GRUB's default once it has stayed healthy for a
 minute, and then `bite-cleanup` deleting a stand-in distro around it,
-traps included, while keeping werewolf's directory and `/boot`. The victim is a 128 MiB ext4 that `mke2fs -d` fills with what bite
-leaves: the root image in slot a and GRUB's environment block. The slot
+traps included, while keeping werewolf's directory and `/boot`. Among the
+traps, `debugfs` makes `/etc/resolv.conf` immutable: bite-cleanup must
+delete the rest of `/etc`, name the file, and exit 1. The victim is a 128 MiB ext4 that `mke2fs -d` fills with what bite
+leaves: the root image in slot a, its kernel, and GRUB's environment block. The slot
 uses `minimal`, which has no updater to reach the network once
 committed.
 
@@ -254,12 +256,28 @@ BOOT_TIMEOUT=20 make check-minimal          # see a hang sooner
 ## CI
 
 [.github/workflows/check.yml](../.github/workflows/check.yml) runs `make
-test`, `make lint` and `make check` on GitHub's x86_64 and arm64 Ubuntu
-runners. [test/ci-setup](../test/ci-setup) installs the tools: Ubuntu's
+test` and `make lint` on GitHub's x86_64 and arm64 Ubuntu runners, and `make
+check` split into jobs that run in parallel, so a failure names the area it
+is in: `forms`, `shellfree`, `integrity`, `cloud`, `persist` and, on arm64,
+`native`. [test/ci-setup](../test/ci-setup) installs the tools: Ubuntu's
 packages, and apko and Zig pinned by version and sha256; `ci-setup apko`
 installs apko alone, for jobs that only resolve packages. Each job keeps its
-logs when it fails. The x86_64 runner has KVM; the arm64 runner has none, so
-QEMU emulates there, and the job still takes under five minutes.
+logs when it fails.
+
+The x86_64 runner has KVM, so it emulates fast and runs every group. The
+arm64 runner has none: a full boot there emulates under TCG, slowly. So arm64
+runs the `native` group instead of `forms` and `shellfree`:
+[test/cage](../test/cage) boots each form's root under `systemd-nspawn` on
+the runner's own kernel -- no virtual machine -- and judges its posture.
+werewolf's runtime protections (the seal, Landlock, fence's policy routing,
+the leash, hidepid, W^X) are the host kernel's own features and hold in a
+container, so cage asserts them directly, and `WEREWOLF_CHECK=1` has the
+in-container posture service attack them too, as `werewolf.check=1` does on a
+booted machine. What a container cannot own -- the kernel's sysctls and boot
+line, dm-verity, a few mount options -- `POSTURE_KNOWN_NATIVE` allows to
+fail; arm64 still emulates `minimal` and `prod` (the `integrity` and `cloud`
+groups) to assert those, and the attacks a container cannot carry. `persist`
+is skipped on emulated arm64 (Makefile).
 
 [.github/workflows/update.yml](../.github/workflows/update.yml) runs `make
 check-updater` nightly, and on demand, on x86_64 alone: `prod`

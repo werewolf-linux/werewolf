@@ -6,6 +6,10 @@
 //!     posture --line    the same, as one line for a console or a log:
 //!                       posture: fail=ID,ID pass=N skip=N {JSON}
 //!     posture --noop    exit 0 at once: what the run-a-program checks run
+//!     posture --attack  also attack the machine (attacks, below), as
+//!                       werewolf.check=1 does, where the command line cannot
+//!                       say so -- a check run in a container. WEREWOLF_CHECK=1
+//!                       in the environment asks the same of the boot service.
 //!
 //! --extended adds the checks werewolf fails by choice, because meeting
 //! them would slow what machines run, or is not yet shown safe with fence
@@ -20,9 +24,11 @@
 //! and expects the copy not to start. It asks the kernel only when the
 //! setting already reads as locked, when the refusal is certain, so a check
 //! that fails never weakens the machine. Nothing touches another process or
-//! /dev/mem, which would write to the kernel log, unless the kernel command
-//! line has werewolf.check=1: werewolf's tests set it, and posture then also
-//! attacks the machine and expects each attack refused (attacks, below).
+//! /dev/mem, which would write to the kernel log, unless asked: the kernel
+//! command line has werewolf.check=1 (werewolf's tests set it), or --attack
+//! or WEREWOLF_CHECK=1 asks where the command line cannot be set. posture then
+//! also attacks the machine and expects each attack refused (attacks, below).
+//! None of the attacks harm a sound machine; each expects to be refused.
 //!
 //! Run as root for the whole picture; as another user some checks read what
 //! they can and some are skipped. It assumes nothing of werewolf: run it on
@@ -50,20 +56,29 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, std.fs.path.basename(args[0]), "run")) return serve(io, gpa);
     var format: Format = .text;
     var extended = false;
+    var attack = false;
     for (args[1..]) |a| {
         if (std.mem.eql(u8, a, "--extended") and !extended) {
             extended = true;
+        } else if (std.mem.eql(u8, a, "--attack") and !attack) {
+            attack = true;
         } else if (std.mem.eql(u8, a, "--json") and format == .text) {
             format = .json;
         } else if (std.mem.eql(u8, a, "--line") and format == .text) {
             format = .line;
         } else {
-            std.debug.print("usage: posture [--extended] [--json | --line]\n", .{});
+            std.debug.print("usage: posture [--extended] [--attack] [--json | --line]\n", .{});
             std.process.exit(2);
         }
     }
 
-    var p: Posture = .{ .io = io, .gpa = gpa, .root = linux.geteuid() == 0, .extended = extended };
+    var p: Posture = .{
+        .io = io,
+        .gpa = gpa,
+        .root = linux.geteuid() == 0,
+        .extended = extended,
+        .attack = attack,
+    };
     try p.run();
     const report = try p.report();
     var out: Io.Writer.Allocating = .init(gpa);
@@ -391,6 +406,10 @@ const Posture = struct {
     root: bool,
     /// Also the checks werewolf fails by choice (--extended).
     extended: bool = false,
+    /// Attack the machine (attacks, below), whatever the command line says:
+    /// --attack, or WEREWOLF_CHECK=1 in the environment, for a check that
+    /// cannot set the kernel command line, such as one run in a container.
+    attack: bool = false,
     checks: std.ArrayList(Check) = .empty,
 
     fn add(p: *Posture, c: Check) !void {
@@ -439,10 +458,22 @@ const Posture = struct {
         try p.programs();
         try p.files();
         try p.network();
+        if (p.root and p.attacksAsked()) return p.attacks();
+    }
+
+    /// Whether to attack: --attack or WEREWOLF_CHECK=1 (a container cannot set
+    /// the kernel command line), or werewolf.check=1 on a real machine's line.
+    fn attacksAsked(p: *Posture) bool {
+        if (p.attack) return true;
+        var env = std.mem.tokenizeScalar(u8, p.read("/proc/self/environ"), 0);
+        while (env.next()) |kv| {
+            if (std.mem.eql(u8, kv, "WEREWOLF_CHECK=1")) return true;
+        }
         var args = std.mem.tokenizeAny(u8, p.read("/proc/cmdline"), " \n");
         while (args.next()) |arg| {
-            if (p.root and std.mem.eql(u8, arg, "werewolf.check=1")) return p.attacks();
+            if (std.mem.eql(u8, arg, "werewolf.check=1")) return true;
         }
+        return false;
     }
 
     // --- kernel ------------------------------------------------------------

@@ -1,6 +1,8 @@
 # werewolf: a Wolfi userland on an Alpine kernel, for virtual machines.
 #
 # Build
+#   make install-deps    install apko, Zig, QEMU, erofs-utils and the rest, after
+#                        asking: macOS, Debian, Ubuntu, Fedora, Arch, FreeBSD
 #   make                 the image: build/<arch>/vmlinuz, build/<arch>/<form>/initramfs.zst
 #   make slot            build/<arch>/<form>/slot/: vmlinuz, stage0, root.erofs, for bite
 #   make disk            build/<arch>/<form>/disk.img: a UEFI boot disk of the slot;
@@ -274,10 +276,15 @@ LIMA_CONSOLE = $(if $(filter vz,$(VMTYPE)),hvc0,$(CONSOLE))
 
 # A target whose name starts with _ is a step another target runs, with
 # FORM set for it; `make help` lists the ones to type.
-.PHONY: all image slot bite-me disk run run-ssh lima lima-delete demo demo-delete webshell-demo _webshell-demo config-tar list-forms test check seal-learn check-slot check-updater check-updater-release _check-updater check-nodata check-lease check-unsigned check-verity check-metadata check-dist check-gcp demo-gcp demo-gcp-delete webshell-gcp webshell-gcp-delete ci relock release-inputs dist posture clean help \
+.PHONY: all install-deps image slot bite-me disk run run-ssh lima lima-delete demo demo-delete webshell-demo _webshell-demo config-tar list-forms test check seal-learn check-slot check-updater check-updater-release _check-updater check-nodata check-lease check-unsigned check-verity check-metadata check-dist check-gcp demo-gcp demo-gcp-delete webshell-gcp webshell-gcp-delete ci relock release-inputs dist posture clean help \
 	_check-form _check-shellfree-boot _check-slot-boot _check-updater-boot _check-nodata-boot _check-lease-boot _check-unsigned-boot _check-unsigned-slot _check-metadata-boots _dist-form _check-dist-disk _check-gcp
 
 all: image
+
+# What the build, run and check need, from the system's package manager
+# and, pinned, from upstream: see tools/install-deps.
+install-deps:
+	@tools/install-deps
 
 # Compiled tutorial applications; their toolchains stay on the build host.
 include examples/build.mk
@@ -767,12 +774,20 @@ CHECK_BOOT = console=$(CONSOLE) $(KERNEL_ARGS) panic=1 werewolf.debug=1 werewolf
 # The posture checks known to fail on the form and architecture, for
 # test/boot to expect.
 export POSTURE_KNOWN = $(shell awk -v b=$(if $(DEV),dev,*) -v f=$(FORM) -v a=$(ARCH) '$$1 == b || $$1 == f || $$1 == a { $$1 = ""; k = k $$0 } END { print k }' test/posture-known)
+# The posture checks test/cage expects to fail in a container, beyond the
+# kernel-* checks it allows by their area (the container shares the host's
+# kernel; only kernel-seal, werewolf's own filter, must hold there). These
+# are a host sysctl behind a files-* check, the mount options of nspawn's own
+# mounts, and the tools a -dev build carries; all are asserted in emulation.
+export POSTURE_KNOWN_NATIVE = files-root-readonly files-nosuid-everywhere files-noexec-everywhere files-nodev-everywhere files-memfd-exec files-links files-system-writes processes-mem-attack network-no-login programs-no-shell programs-no-downloaders programs-no-interpreters
 CHECK_CMDLINE = $(CHECK_BOOT) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3
 # What every form shares, built once before the forms build side by side.
 CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(DHCP) $(CLOUD) $(BITE_CLEANUP) $(PG_INIT) $(PG_SHIM) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(PROGRAMS)/slot-update/usr/lib/werewolf/slot-update
 # minimal has no updater, which would fetch from the network once committed.
 CHECK_SLOT_FORM = minimal
 VICTIM_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec
+# debugfs, from e2fsprogs, which Homebrew keeps off the PATH.
+DEBUGFS = $(firstword $(shell command -v debugfs) $(wildcard /opt/homebrew/opt/e2fsprogs/sbin/debugfs /usr/local/opt/e2fsprogs/sbin/debugfs))
 
 # The suite splits into groups so CI (.github/workflows/check.yml) runs each
 # as its own job, in parallel, and a failure names the area it is in. Each
@@ -786,6 +801,25 @@ check-cloud:     check-metadata check-nodata check-lease
 
 check: check-forms check-shellfree check-integrity check-cloud check-persist
 	@echo "check: every form, and a slot, passed"
+
+# check-native boots each form's root under systemd-nspawn on this kernel --
+# no virtual machine -- and judges its posture (test/cage). It is the fast
+# half of the arm64 checks (.github/workflows/check.yml), where a full boot
+# emulates slowly: werewolf's runtime protections are the host kernel's own
+# features and hold in a container, so cage asserts them directly, while
+# check-integrity and check-cloud emulate minimal and prod for the kernel and
+# boot-chain hardening -- and the attacks -- a container cannot carry.
+NATIVE_FORMS = minimal prod nginx php node python jre postgresql webshell-example
+NATIVE_CHECKS = $(addprefix check-native-,$(NATIVE_FORMS))
+.PHONY: check-native $(NATIVE_CHECKS) _check-native
+check-native: $(NATIVE_CHECKS)
+$(NATIVE_CHECKS): check-native-%: | $(CHECK_SHARED)
+	@mkdir -p $(CHECK)
+	@$(CHECK_MAKE) FORM=$* slot >$(CHECK)/$*-native-build.log 2>&1 || \
+		{ tail -n 20 $(CHECK)/$*-native-build.log; echo "FAIL   $*-native build: see $(CHECK)/$*-native-build.log"; exit 1; }
+	@$(CHECK_MAKE) FORM=$* _check-native
+_check-native:
+	@test/cage $(FORM) $(OUT)/slot/root.erofs $(CHECK)/$(FORM)-native.log
 
 # What the forms' services would need that their pledges do not promise:
 # make check's boots of DEV=1 builds, the seal and each pledge allowing
@@ -830,9 +864,15 @@ _check-form:
 		$(if $(CHECK_SSH),rm -f $(CHECK)/$(FORM)-key $(CHECK)/$(FORM)-key.pub && \
 			ssh-keygen -q -t ed25519 -N '' -C werewolf-check -f $(CHECK)/$(FORM)-key && \
 			cp $(CHECK)/$(FORM)-key.pub $(CHECK)/$(FORM)-config/authorized_keys &&) \
+		$(if $(filter bastion,$(FORM)),mkdir -p $(CHECK)/$(FORM)-config/bastion && \
+			ssh-keygen -q -t ed25519 -N '' -f $(CHECK)/$(FORM)-config/bastion/host_key && \
+			cp $(CHECK)/$(FORM)-key.pub $(CHECK)/$(FORM)-config/bastion/authorized_keys &&) \
+		$(if $(filter tailscale,$(FORM)),mkdir -p $(CHECK)/$(FORM)-config/tailscale && \
+			printf '%s\n' tskey-auth-offline-test >$(CHECK)/$(FORM)-config/tailscale/auth_key &&) \
 		COPYFILE_DISABLE=1 $(TAR) --uid 0 --gid 0 --numeric-owner -cf $(CHECK)/$(FORM)-config.tar -C $(CHECK)/$(FORM)-config .
-	@SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key test/boot $(FORM) test/checks $(CHECK)/$(FORM).log $(CHECK_FORM_QEMU)
-	@SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key test/boot $(FORM)-again test/checks-again $(CHECK)/$(FORM)-again.log $(CHECK_FORM_QEMU)
+	@awk '$(if $(filter tailscale,$(FORM)),$$2 != "listeners",1)' test/checks $(wildcard test/checks-$(FORM)) >$(CHECK)/$(FORM)-checks
+	@SSH_MODE=$(FORM) SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key test/boot $(FORM) $(CHECK)/$(FORM)-checks $(CHECK)/$(FORM).log $(CHECK_FORM_QEMU)
+	@SSH_MODE=$(FORM) SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key test/boot $(FORM)-again test/checks-again $(CHECK)/$(FORM)-again.log $(CHECK_FORM_QEMU)
 	@! grep -a -E 'werewolf: (formatting|making LUKS2) ' $(CHECK)/$(FORM)-again.log || \
 		{ echo "FAIL   $(FORM)-again        formatted the disk its first boot left"; exit 1; }
 
@@ -1010,17 +1050,29 @@ check-slot: | $(CHECK_SHARED) check-$(CHECK_SLOT_FORM)
 
 _check-slot-boot:
 	@rm -rf $(CHECK)/victim $(CHECK)/victim.img
-	@mkdir -p $(CHECK)/victim/var/lib/werewolf/a $(CHECK)/victim/boot/grub
+	@mkdir -p $(CHECK)/victim/var/lib/werewolf/a $(CHECK)/victim/boot/grub $(CHECK)/victim/boot/werewolf/a
 	@cp $(OUT)/slot/root.erofs $(CHECK)/victim/var/lib/werewolf/a/
+	@# bite lays the slot's kernel beside GRUB's directory; this boot takes
+	@# its own, so a stand-in, which bite-cleanup must find before it deletes.
+	@echo kernel >$(CHECK)/victim/boot/werewolf/a/vmlinuz
 	@# A distro beside werewolf, for bite-cleanup: what it must delete, a
-	@# name that only begins like one it keeps, and links that lead out.
+	@# name that only begins like one it keeps, links that lead out, and
+	@# (below) a file it may not delete.
 	@v=$(CHECK)/victim; mkdir -p $$v/etc $$v/home/user/.ssh $$v/var/log $$v/var/lib/werewolf2 && \
 		echo ID=debian >$$v/etc/os-release && echo secret >$$v/home/user/.ssh/id && echo log >$$v/var/log/syslog && \
+		echo nameserver 10.0.2.3 >$$v/etc/resolv.conf && \
 		touch $$v/bootx && ln -s /run/werewolf $$v/etc/escape && ln -s ../../.. $$v/var/lib/up
 	@env=$(CHECK)/victim/boot/grub/grubenv; \
 		printf '# GRUB Environment Block\nsaved_entry=werewolf-b\nnext_entry=werewolf-a\n' >$$env; \
 		head -c $$((1024 - $$(wc -c <$$env))) /dev/zero | tr '\0' '#' >>$$env
 	@mke2fs -q -F -t ext4 -U $(VICTIM_UUID) -d $(CHECK)/victim $(CHECK)/victim.img 128M
+	@# resolv.conf immutable (chattr +i), as some cloud agents leave it:
+	@# bite-cleanup must delete the rest of /etc around it, and name it.
+	@d="$(DEBUGFS)"; img=$(CHECK)/victim.img; [ -n "$$d" ] || { echo "FAIL   slot               no debugfs (e2fsprogs)"; exit 1; }; \
+		flags() { "$$d" -R "stat /etc/resolv.conf" $$img 2>/dev/null | sed -n 's/.*Flags: \(0x[0-9a-f]*\).*/\1/p'; }; \
+		f=$$(flags); [ -n "$$f" ] && "$$d" -w -R "set_inode_field /etc/resolv.conf flags $$((f | 0x10))" $$img 2>/dev/null && \
+		f=$$(flags) && [ -n "$$f" ] && [ $$((f & 0x10)) -ne 0 ] || \
+		{ echo "FAIL   slot               /etc/resolv.conf not made immutable"; exit 1; }
 	@test/boot slot test/checks $(CHECK)/slot.log $(CHECK_QEMU) \
 		-kernel $(OUT)/slot/vmlinuz -initrd $(OUT)/slot/initramfs.zst \
 		-append "$(CHECK_CMDLINE) init=/init werewolf.slot=a werewolf.victim=$(VICTIM_UUID):/var/lib/werewolf werewolf.grubenv=$(VICTIM_UUID):/boot/grub/grubenv" \

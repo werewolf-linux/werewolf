@@ -59,7 +59,16 @@ jobs:
         # shellfree the shell-free rebuilds; integrity the slot, its unsigned
         # refusal and verity; cloud the metadata, no-data and lease boots;
         # persist the UEFI-firmware power-cut run (skipped on emulated arm).
-        group: [forms, shellfree, integrity, cloud, persist]
+        # x86_64 runs them all under KVM. arm64 has no KVM, so rather than
+        # emulate every form it runs them natively under systemd-nspawn
+        # (native, test/cage); integrity and cloud still emulate minimal and
+        # prod there, asserting the kernel, boot-chain and attack checks a
+        # container cannot carry.
+        group: [forms, shellfree, integrity, cloud, persist, native]
+        exclude:
+          - { runner: ubuntu-26.04, group: native }        # x86_64 emulates fast under KVM
+          - { runner: ubuntu-26.04-arm, group: forms }      # arm runs these natively instead
+          - { runner: ubuntu-26.04-arm, group: shellfree }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:

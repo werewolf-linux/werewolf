@@ -221,6 +221,19 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 	set ssh [list ssh -p $env(SSH_PORT) -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 		-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR -o IdentitiesOnly=yes]
 	set key [list -i $env(SSH_KEY)]
+	if {[info exists env(SSH_MODE)] && $env(SSH_MODE) eq "bastion"} {
+		foreach {check args pattern} {
+			bastion-no-session {bastion@127.0.0.1 true} {*open failed*}
+			bastion-no-destination {-W 127.0.0.1:22 bastion@127.0.0.1} {*administratively prohibited*}
+			bastion-no-remote {-o ExitOnForwardFailure=yes -R 127.0.0.1:0:127.0.0.1:22 bastion@127.0.0.1 true} {*forwarding failed*}
+			bastion-pq-required {-o KexAlgorithms=curve25519-sha256 bastion@127.0.0.1 true} {*no matching key exchange method*}
+		} {
+			lassign [host [list {*}$ssh {*}$key {*}$args]] status out
+			if {$status != 0 && [string match $pattern $out]} {
+				say ok $check
+			} else { say FAIL $check $out; incr failed }
+		}
+	} else {
 	set in 0
 	for {set i 0} {$i < 30 && !$in} {incr i} {
 		lassign [host [list {*}$ssh {*}$key root@127.0.0.1 id -u]] status out
@@ -241,6 +254,7 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 		say FAIL ssh-keys-only "something but a key was offered:\n$out"
 		incr failed
 	}
+}
 }
 
 # By what the machine's console says: each seen line, waited

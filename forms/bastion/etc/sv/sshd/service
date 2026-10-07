@@ -1,0 +1,11 @@
+exec    /usr/bin/sshd -D -e -f /etc/ssh/sshd_config
+user    bastion
+pledge  stdio rpath wpath inet unix listen connect proc exec seccomp
+listen  tcp/22
+connect tcp/22
+read    /etc/ssh
+run     /usr/lib/ssh/sshd-auth /usr/lib/ssh/sshd-session
+config  host-key /run/config/bastion/host_key
+config  authorized-keys /run/config/bastion/authorized_keys
+memory  256
+nofile  1024

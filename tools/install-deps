@@ -1,0 +1,233 @@
+#!/bin/sh
+# install-deps: install what building, booting and checking werewolf
+# needs, on macOS, Debian, Ubuntu, Fedora, Arch or FreeBSD, after showing
+# what it will run and asking. Packages come from the system's package
+# manager, as root through doas or sudo (Homebrew's, as the user). What a
+# system lacks at the version the build needs comes from upstream, pinned
+# by version and sha256: apko, Zig, and erofs-utils, built from source
+# where the system's is older than 1.9 or has no LZMA. FreeBSD has no
+# apko release, so it is built with Go, pinned by Go's checksum database.
+#
+# A shell script, not a Zig program: it is what installs Zig.
+# `make install-deps` runs it; on FreeBSD, whose make is not GNU make,
+# run it directly, and use gmake after.
+#
+# Commands and package lists are words split on purpose, with globbing off.
+# shellcheck disable=SC2086
+set -euf
+
+apko_version=1.3.1
+zig_version=0.17.0 # the Makefile's ZIG_VERSION
+erofs_version=1.9.4
+erofs_sha256=7d135aa2550326a5acf20f53c518aea5a8900015ce50700044e40f818c31dd80
+
+die() {
+	echo "install-deps: $*" >&2
+	exit 1
+}
+
+arch=$(uname -m)
+case $arch in
+amd64) arch=x86_64 ;;
+arm64) arch=aarch64 ;;
+esac
+
+erofs_ok() { # mkfs.erofs is 1.9 or later, with LZMA, as the Makefile insists
+	v=$(mkfs.erofs --version 2>/dev/null | sed -n 's/.*erofs-utils) *//p')
+	case $v in '' | 1.[0-8] | 1.[0-8].*) return 1 ;; esac
+	{ mkfs.erofs --version; mkfs.erofs --help; } 2>&1 | grep -q 'available compressors:.*lzma'
+}
+
+# Per system: its name; the commands that install its packages; where
+# upstream's come from, zos, the OS in Zig's release names, and the
+# sha256 of Zig's and apko's; and the packages erofs-utils builds from,
+# if it must, with the make and environment that build it.
+update='' zos='' zig_sha256='' apko_sha256='' erofs_deps='' erofs_env='' mk=make
+root='' need_apko='' need_zig=''
+nc=$(command -v nc >/dev/null || echo yes)
+case $(uname -s) in
+Darwin)
+	command -v brew >/dev/null || die "needs Homebrew: https://brew.sh"
+	[ "$(id -u)" != 0 ] || die "Homebrew will not run as root; run as yourself"
+	system="macOS $(sw_vers -productVersion)"
+	install="brew install apko lima qemu zstd erofs-utils zig mtools e2fsprogs"
+	;;
+Linux)
+	[ -r /etc/os-release ] || die "no /etc/os-release: which Linux is this?"
+	# shellcheck source=/dev/null
+	. /etc/os-release
+	system=${PRETTY_NAME:-Linux}
+	zos=linux
+	case $arch in
+	x86_64)
+		zig_sha256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+		apko_sha256=b8c39ff7e63864efa1296d36a95d3c56f750ef2ab41cdc6d7fad0ae6a483b604
+		;;
+	aarch64)
+		zig_sha256=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
+		apko_sha256=47ec5e9e66372629919598f5176b37e9e47a3be456b2c8c9541a891065123fbb
+		;;
+	*) die "$arch is not supported: x86_64 or aarch64" ;;
+	esac
+	case " ${ID:-} ${ID_LIKE:-} " in
+	*" debian "* | *" ubuntu "*)
+		case $arch in
+		x86_64) qemu="qemu-system-x86 ovmf" ;;
+		aarch64) qemu="qemu-system-arm qemu-efi-aarch64" ;;
+		esac
+		update="apt-get update -q"
+		install="apt-get install -y -q --no-install-recommends ca-certificates curl make xz-utils zstd
+			libarchive-tools erofs-utils e2fsprogs mtools qemu-utils expect $qemu${nc:+ netcat-openbsd}"
+		erofs_deps="apt-get install -y -q --no-install-recommends autoconf automake libtool pkg-config gcc
+			liblz4-dev liblzma-dev libzstd-dev uuid-dev zlib1g-dev"
+		;;
+	*" fedora "*)
+		case $arch in
+		x86_64) qemu="qemu-system-x86 edk2-ovmf" ;;
+		aarch64) qemu="qemu-system-aarch64 edk2-aarch64" ;;
+		esac
+		install="dnf install -y curl make xz zstd bsdtar erofs-utils e2fsprogs mtools qemu-img
+			expect $qemu${nc:+ netcat}"
+		erofs_deps="dnf install -y autoconf automake libtool pkgconf-pkg-config gcc
+			lz4-devel xz-devel libzstd-devel libuuid-devel zlib-devel"
+		;;
+	*" arch "*)
+		case $arch in
+		x86_64) qemu="qemu-system-x86 edk2-ovmf" ;;
+		aarch64) qemu="qemu-system-aarch64" ;; # Arch Linux ARM packages no edk2
+		esac
+		# Arch installs onto an up-to-date system only: -Syu.
+		install="pacman -Syu --needed --noconfirm curl make xz zstd libarchive erofs-utils e2fsprogs
+			mtools qemu-img expect $qemu${nc:+ openbsd-netcat}"
+		erofs_deps="pacman -S --needed --noconfirm base-devel lz4 xz zstd util-linux-libs zlib"
+		;;
+	*) die "$system is not supported: Debian, Ubuntu, Fedora or Arch" ;;
+	esac
+	;;
+FreeBSD)
+	system="FreeBSD $(freebsd-version)"
+	zos=freebsd
+	mk=gmake
+	erofs_env="CPPFLAGS=-I/usr/local/include LDFLAGS=-L/usr/local/lib"
+	case $arch in
+	x86_64) zig_sha256=a314f1cc92d098bd39caf9e5607a0de2a8fd0d00064776cb3fd5b3bee38a67c9 ;;
+	aarch64) zig_sha256=3cf53d07b3587a26727b196a6eb7918704b907d951520daa68e4e1820fc6f48e ;;
+	*) die "$arch is not supported: amd64 or arm64" ;;
+	esac
+	# Its base has bsdtar, nc, xz and zstd; ports have no erofs-utils.
+	install="pkg install -y gmake curl qemu-nox11 mtools e2fsprogs-core expect$(command -v apko >/dev/null || echo ' go')"
+	erofs_deps="pkg install -y autoconf automake libtool pkgconf liblz4 zstd"
+	;;
+*) die "$(uname -s) is not supported: macOS, Debian, Ubuntu, Fedora, Arch or FreeBSD" ;;
+esac
+if [ -n "$zos" ]; then
+	if [ "$(id -u)" = 0 ]; then
+		root=''
+	elif command -v doas >/dev/null; then
+		root=doas
+	elif command -v sudo >/dev/null; then
+		root=sudo
+	else
+		die "needs doas or sudo, or root"
+	fi
+	need_apko=$(command -v apko >/dev/null || echo yes)
+	need_zig=$([ "$(zig version 2>/dev/null)" = "$zig_version" ] || echo yes)
+fi
+
+show() { # show COMMAND...: on one line, indented
+	printf ' '
+	printf ' %s' "$@"
+	echo
+}
+
+echo "install-deps: on $system ($arch)${root:+, as root through $root}, this will:"
+echo
+[ -z "$update" ] || show $update
+show $install
+case $need_apko$zos in
+yeslinux) echo "  install apko $apko_version from github.com/chainguard-dev/apko as /usr/local/bin/apko" ;;
+yesfreebsd) echo "  build apko $apko_version with go install, as /usr/local/bin/apko" ;;
+esac
+[ -z "$need_zig" ] ||
+	echo "  install zig $zig_version from ziglang.org in /usr/local/zig-$zig_version, linked as /usr/local/bin/zig"
+if [ -n "$zos" ]; then
+	if ! erofs_ok; then
+		echo "  if mkfs.erofs is then older than 1.9 or has no LZMA, build erofs-utils $erofs_version"
+		show into /usr/local, after: $erofs_deps
+	fi
+	echo
+	echo "  Lima, which make lima and make demo use, is not installed; make run needs only QEMU."
+fi
+echo
+printf 'Continue? [y/N] '
+read -r answer || answer=
+case $answer in
+[yY]*) ;;
+*) die "nothing installed" ;;
+esac
+
+[ -z "$update" ] || $root $update
+$root $install
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+fetch() { # fetch URL SHA256 FILE
+	echo "install-deps: fetching $1"
+	curl -fsSL --retry 3 -o "$tmp/$3" "$1"
+	if command -v sha256sum >/dev/null; then
+		got=$(sha256sum "$tmp/$3")
+	else
+		got=$(sha256 -r "$tmp/$3")
+	fi
+	[ "${got%% *}" = "$2" ] || die "$1: sha256 ${got%% *}, not $2"
+}
+
+if [ -n "$need_apko" ]; then
+	case $zos in
+	linux)
+		go=$(echo "$arch" | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+		fetch "https://github.com/chainguard-dev/apko/releases/download/v$apko_version/apko_${apko_version}_linux_$go.tar.gz" \
+			"$apko_sha256" apko.tar.gz
+		tar -xzf "$tmp/apko.tar.gz" -C "$tmp"
+		;;
+	freebsd)
+		echo "install-deps: building apko $apko_version"
+		GOBIN=$tmp go install "chainguard.dev/apko@v$apko_version"
+		;;
+	esac
+	$root mkdir -p /usr/local/bin
+	$root install -m 0755 "$(find "$tmp" -type f -name apko)" /usr/local/bin/apko
+fi
+
+if [ -n "$need_zig" ]; then
+	fetch "https://ziglang.org/download/$zig_version/zig-$arch-$zos-$zig_version.tar.xz" "$zig_sha256" zig.tar.xz
+	mkdir "$tmp/zig"
+	tar -xJf "$tmp/zig.tar.xz" -C "$tmp/zig" --strip-components=1
+	$root rm -rf "/usr/local/zig-$zig_version"
+	$root mkdir -p /usr/local/bin
+	$root cp -R "$tmp/zig" "/usr/local/zig-$zig_version"
+	$root ln -sf "/usr/local/zig-$zig_version/zig" /usr/local/bin/zig
+fi
+
+hash -r
+if [ -n "$zos" ] && ! erofs_ok; then
+	echo "install-deps: building erofs-utils $erofs_version"
+	$root $erofs_deps
+	fetch "https://github.com/erofs/erofs-utils/archive/refs/tags/v$erofs_version.tar.gz" "$erofs_sha256" erofs.tar.gz
+	tar -xzf "$tmp/erofs.tar.gz" -C "$tmp"
+	(cd "$tmp/erofs-utils-$erofs_version" && ./autogen.sh >/dev/null &&
+		env $erofs_env ./configure -q --prefix=/usr/local --enable-lzma --enable-lz4 --with-libzstd --disable-fuse &&
+		$mk -s -j"$(getconf _NPROCESSORS_ONLN)")
+	$root $mk -s -C "$tmp/erofs-utils-$erofs_version" install
+	hash -r
+fi
+
+erofs_ok || die "mkfs.erofs is $(command -v mkfs.erofs || echo missing): is /usr/local/bin first in PATH?"
+[ "$(zig version 2>/dev/null)" = "$zig_version" ] ||
+	die "zig is $(command -v zig || echo missing): is /usr/local/bin first in PATH?"
+echo "install-deps: apko $(apko version 2>/dev/null | sed -n 's/^GitVersion: *//p'), zig $(zig version)," \
+	"$(mkfs.erofs --version | head -n 1), $(qemu-system-"$arch" --version | head -n 1)"
+if [ -e /dev/kvm ] && [ ! -w /dev/kvm ]; then
+	echo "install-deps: /dev/kvm is not yours, so QEMU will emulate, slowly: join its group, then log in again"
+fi

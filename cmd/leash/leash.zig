@@ -39,6 +39,8 @@
 //!                             (lib/seal.zig); required, once
 //!     env NAME=VALUE          its environment, otherwise only PATH
 //!     secret NAME PATH        a variable read from a file; never logged
+//!     config NAME PATH        copy a /run/config file to this service's
+//!                             /run/svc/SERVICE/NAME, mode 0600; never logged
 //!     nofile N                its limit on open files
 //!     memory N                its resident memory ceiling, in MiB: the
 //!                             service's cgroup memory.max, so one service
@@ -172,6 +174,14 @@ pub fn main(init: std.process.Init) !void {
         );
         try env.put(sec[0], value);
     }
+    // Read only the files the image names, while root. Write their copies
+    // only AFTER dropping root and entering Landlock: a service cannot use
+    // a link or a restart race to make a privileged writer act for it.
+    const configs = try gpa.alloc([]const u8, s.configs.len);
+    for (s.configs, configs) |cfg, *value| {
+        value.* = Dir.cwd().readFileAlloc(io, cfg[1], gpa, .limited(max_file)) catch |err|
+            fail(io, ctl, .park, name, "config {s}: {s}", .{ cfg[0], @errorName(err) });
+    }
 
     const run_dir = try gpa.printSentinel("/run/svc/{s}", .{name}, 0);
     const data_dir = try gpa.printSentinel("/data/svc/{s}", .{name}, 0);
@@ -270,6 +280,10 @@ pub fn main(init: std.process.Init) !void {
     // --- leashed --------------------------------------------------------------
 
     rules.restrict() catch |err| fail(io, ctl, .park, name, "Landlock: {s}", .{@errorName(err)});
+    for (s.configs, configs) |cfg, value| {
+        copyConfig(run_dir, try gpa.dupeSentinel(u8, cfg[0], 0), value) catch |err|
+            fail(io, ctl, .park, name, "config {s}: {s}", .{ cfg[0], @errorName(err) });
+    }
     record(
         io,
         .{
@@ -388,6 +402,7 @@ const Service = struct {
     requires: []const []const u8 = &.{},
     env: []const [2][]const u8 = &.{},
     secrets: []const [2][]const u8 = &.{},
+    configs: []const [2][]const u8 = &.{},
     nofile: ?u32 = null,
     memory: ?u32 = null,
     pledge: seal.Set = .empty,
@@ -413,6 +428,7 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var requires: std.ArrayList([]const u8) = .empty;
     var env: std.ArrayList([2][]const u8) = .empty;
     var secrets: std.ArrayList([2][]const u8) = .empty;
+    var configs: std.ArrayList([2][]const u8) = .empty;
 
     var lines = std.mem.splitScalar(u8, text, '\n');
     var n: usize = 0;
@@ -476,6 +492,15 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
                 "a path must be absolute, without . or .. or //",
             );
             try secrets.append(gpa, .{ args[0], args[1] });
+        } else if (std.mem.eql(u8, key, "config")) {
+            if (args.len != 2 or
+                !isName(args[0])) return invalid(bad, "config takes a plain NAME and PATH");
+            if (!isCleanPath(args[1]) or !std.mem.startsWith(u8, args[1], "/run/config/"))
+                return invalid(bad, "config source must be beneath /run/config");
+            if (configs.items.len == 32) return invalid(bad, "at most 32 config files");
+            for (configs.items) |cfg| if (std.mem.eql(u8, cfg[0], args[0]))
+                return invalid(bad, "config name repeated");
+            try configs.append(gpa, .{ args[0], args[1] });
         } else if (std.mem.eql(u8, key, "pledge")) {
             if (pledge != null) return invalid(bad, "pledge twice");
             if (args.len == 0) return invalid(bad, "pledge takes promises");
@@ -523,6 +548,7 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
         .requires = requires.items,
         .env = env.items,
         .secrets = secrets.items,
+        .configs = configs.items,
         .nofile = nofile,
         .memory = memory,
     };
@@ -660,6 +686,38 @@ fn readSecret(io: Io, gpa: Allocator, path: []const u8) ![]const u8 {
     if (value.len == 0) return error.Empty;
     for (value) |c| if (c == 0 or c == '\n') return error.NotOneLine;
     return value;
+}
+
+/// Called as the service, inside Landlock. Never truncate an existing
+/// inode (which could be a hard link); replace the name with a new 0600
+/// file. Pin the directory, refuse symlinks and fail closed on a race.
+fn copyConfig(dir: [:0]const u8, name: [:0]const u8, value: []const u8) !void {
+    const d = linux.open(
+        dir,
+        .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(d) != .SUCCESS) return error.OpenDirectory;
+    const dfd: linux.fd_t = @intCast(d);
+    defer _ = linux.close(dfd);
+    const un = linux.unlinkat(dfd, name, 0);
+    if (linux.errno(un) != .SUCCESS and linux.errno(un) != .NOENT) return error.Unlink;
+    const f = linux.openat(
+        dfd,
+        name,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true },
+        0o600,
+    );
+    if (linux.errno(f) != .SUCCESS) return error.CreateFile;
+    const fd: linux.fd_t = @intCast(f);
+    defer _ = linux.close(fd);
+    var off: usize = 0;
+    while (off < value.len) {
+        const n = linux.write(fd, value[off..].ptr, value.len - off);
+        if (linux.errno(n) == .INTR) continue;
+        if (linux.errno(n) != .SUCCESS or n == 0) return error.WriteFile;
+        off += n;
+    }
 }
 
 fn allowPath(
@@ -1039,6 +1097,7 @@ test parse {
         \\requires /run/config/nginx/cert.pem
         \\env     "GREETING=hello world"
         \\secret  TOKEN /run/config/x/token
+        \\config  host-key /run/config/ssh/host_key
         \\nofile  65536
         \\memory  512
         \\pledge  stdio rpath inet listen connect exec
@@ -1053,6 +1112,8 @@ test parse {
     try testing.expectEqualStrings("/run/config/nginx/cert.pem", s.requires[0]);
     try testing.expectEqualStrings("hello world", s.env[0][1]);
     try testing.expectEqualStrings("TOKEN", s.secrets[0][0]);
+    try testing.expectEqualStrings("host-key", s.configs[0][0]);
+    try testing.expectEqualStrings("/run/config/ssh/host_key", s.configs[0][1]);
     try testing.expectEqual(65536, s.nofile.?);
     try testing.expectEqual(512, s.memory.?);
     try testing.expect(s.pledge.contains(.listen) and !s.pledge.contains(.proc));
@@ -1071,6 +1132,14 @@ test "parse refuses" {
         .{ .text = "exec /a\nuser x\nlisten tcp/0", .line = 3 },
         .{ .text = "exec /a\nuser x\nread /etc//x", .line = 3 },
         .{ .text = "exec /a\nuser x\nenv 1X=y", .line = 3 },
+        .{ .text = "exec /a\nuser x\nconfig ../key /run/config/key", .line = 3 },
+        .{ .text = "exec /a\nuser x\nconfig key /etc/shadow", .line = 3 },
+        .{ .text = "exec /a\nuser x\nconfig key /run/config/../shadow", .line = 3 },
+        .{ .text = "exec /a\nuser x\nconfig key /run/config", .line = 3 },
+        .{
+            .text = "exec /a\nuser x\nconfig key /run/config/a\nconfig key /run/config/b",
+            .line = 4,
+        },
         .{ .text = "exec /a \"b\nuser x", .line = 1 },
         .{ .text = "exec /a b\"c\"\nuser x", .line = 1 },
         .{ .text = "exec /a\nuser x\nnofile 0", .line = 3 },
@@ -1126,4 +1195,26 @@ test lookupUser {
         lookupUser("root:x:0:0::/:/x\nnginx:x:200:200::/var/empty:/sbin/nologin\n", "nginx").?,
     );
     try testing.expectEqual(null, lookupUser("nginx2:x:1:1::/:/x\n", "nginx"));
+}
+
+test "config copies replace links, not their targets" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    var buf: [Dir.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &buf);
+    const path = try testing.allocator.dupeSentinel(u8, buf[0..n], 0);
+    defer testing.allocator.free(path);
+    try tmp.dir.writeFile(io, .{ .sub_path = "victim", .data = "unchanged" });
+    try tmp.dir.symLink(io, "victim", "key", .{});
+    try copyConfig(path, "key", "first\n");
+    try testing.expectEqualStrings("unchanged", try tmp.dir.readFile(io, "victim", &buf));
+    try testing.expectEqualStrings("first\n", try tmp.dir.readFile(io, "key", &buf));
+    const st = try tmp.dir.statFile(io, "key", .{});
+    try testing.expectEqual(@as(u32, 0o600), st.permissions.toMode() & 0o777);
+    try copyConfig(path, "key", "second\n");
+    try testing.expectEqualStrings("second\n", try tmp.dir.readFile(io, "key", &buf));
+    try tmp.dir.createDir(io, "directory", .default_dir);
+    try testing.expectError(error.Unlink, copyConfig(path, "directory", "no"));
 }

@@ -2,52 +2,38 @@
 
 <img src="docs/media/logo-small.png" alt="werewolf logo" width="160" align="right">
 
-werewolf is a Linux for virtual machines that gives malware nothing to run
-with. The production base has no shell and no interpreter. The root
-filesystem is read-only. The kernel is locked at boot, and not even root
-can unlock it.
+werewolf is a security paranoid, high-performance Linux distro for VMs.
 
-It is [Wolfi](https://wolfi.dev/)'s userland on
-[Alpine](https://www.alpinelinux.org/)'s kernel, built the way OpenBSD would
-build it.
+Our idea is: build a declarative Linux distribution so secure that your
+software runs amazing on it, but impossible to execute malware on it.
 
-## How it stays locked
+werewolf takes inspiration from ChromeOS (signing, A/B upgrades), OpenBSD (pledge),
+and Chainguard OS (shell-free images). It mixes an [Alpine](https://www.alpinelinux.org/) kernel,
+[Wolfi](https://wolfi.dev/) packages, and it's own OpenBSD-style
+privilege-separated binaries for basic functions such as auto-updates. Images are composed using [apko](https://github.com/chainguard-dev/apko).
 
-- **[No shell.](docs/design/shell-free.md)** The production base carries no shell
-  or interpreter; application forms add runtimes explicitly. A service is a
-  ten-line declaration, which `leash` starts as its own user under Landlock.
-  A shell is a build option, never a dependency.
-- **Nothing written runs.** The root is a read-only erofs image. `/data`,
-  `/tmp`, `/run`, `/dev/shm` and memfds are `noexec`, and user namespaces are
-  off. werewolf's `mount` can add restrictions but never remove them.
-- **[Locked at boot.](docs/design/lockdown.md)** Before the first service
-  starts, init closes the module loader, raises kernel lockdown, turns off
-  ptrace, and seals PID 1 with seccomp. Every process inherits the seal, so
-  even root has no eBPF, perf, kexec, io_uring or `/dev/mem`.
-- **[Network policy fixed at build.](docs/design/fence.md)** `fence` allows
-  only the ports a form serves and the destinations each user may reach.
-  There is no firewall to configure.
+## Secure by default
+
+- **Declarative, Reproducible**: Uses apko (YAML) to declare what software can run within a VM; nothing else will. 
+- **[Signed Binaries]**: by default, Werewolf only runs programs included in the build.
+- **[Landlock/Seccomp Everywhere](docs/design/lockdown.md)**: all programs inherit a secure-by-default: including disabling ptrace, io_uring, /dev/kmem
+- **[Application firewalling]**: every application defines which ports they listen on and connect to, violations are logged. 
+- **[Shell-free execution](docs/design/shell-free.md)** Don't need a shell? Don't include it.
+- All writeable partitions disallow execution: no /dev/shm droppers here!
 - **[Privilege separation.](docs/programs.md)** werewolf's own programs are
-  small static Zig in the OpenBSD style. The half that reads untrusted input
+  small static Zig binaries in the privilege-separated OpenBSD style. The half that reads untrusted input
   runs as its own user, chrooted, with no capabilities, under seccomp.
 - **[Auditable updates.](docs/updater.md)** Packages and kernel come straight
   from Wolfi and Alpine, with no build server between. Each update logs the
   CVEs it fixes. A new image boots once and stays only if it stays healthy.
-- **Small.** `minimal` is 9 packages and 3 MB, listens on nothing, and boots
-  in 0.17 s. There is no systemd, no PAM, and no setuid file.
-- **[Tested.](docs/testing.md)** Every push boots every form on two
-  architectures, tries the attacks, and fails if one gets through.
-
-What is not yet closed, and how to check a machine by hand, is in
-[docs/security.md](docs/security.md). Where it is going, Linux IPE and
-machines that run only code we signed, is in
-[docs/design/verified-boot.md](docs/design/verified-boot.md).
+- **Damn Small.** Our `minimal` image is only 3MB and 7 packages large.
+- **[Posture Tested.](docs/testing.md)** Every push asserts our security posture against dozens of attacks.
 
 ## Try it
 
 ```sh
-brew install apko lima qemu zstd erofs-utils zig    # macOS; Zig 0.17
-make lima                                           # build, boot and ssh in
+make install-deps          # macOS, Debian, Ubuntu, Fedora, Arch; FreeBSD: tools/install-deps
+make lima                  # build, boot and ssh in (macOS)
 
 # or with QEMU alone
 make run                   # the sshd form, with a root shell on the console
@@ -81,6 +67,8 @@ one includes `minimal`. `make list-forms` shows the include chains.
 | `prod` | DHCP, the cloud's metadata, updates itself, `/data` on a disk (in LUKS2 with `data.key`); no shell, nothing listening. Build yours on this. |
 | `app` | `prod` plus an unprivileged application user and group; no runtime or service |
 | `prod-ssh` | `prod` plus sshd |
+| `bastion` | forwarding-only SSH with explicit destinations and hybrid post-quantum key exchange ([setup](docs/bastion.md)) |
+| `tailscale` | unprivileged, userspace subnet router ([setup](docs/tailscale.md)) |
 | `nginx`, `php`, `node`, `python`, `jre` | `prod` and one runtime, leashed: bake your site or application into a form on one ([docs/forms.md](docs/forms.md)) |
 | `postgresql`, `demo` | leashed services |
 | `webshell-example` | a deliberately vulnerable web app, to show the sandbox holds (`make webshell-demo`) |

@@ -21,6 +21,8 @@ why there are so few.
 | `postgresql` | `prod` | PostgreSQL 17 on a UNIX socket ([postgresql.md](postgresql.md)) |
 | `demo` | `postgresql` | nginx and the status page ([demo.md](demo.md)) |
 | `prod-ssh` | `prod` | sshd, for people who log in |
+| `bastion` | `prod` | forwarding-only SSH, with explicit destinations ([bastion.md](bastion.md)) |
+| `tailscale` | `prod` | userspace subnet routing ([tailscale.md](tailscale.md)) |
 | `sshd`, `qemu-host` | `minimal` | sshd with a shell; and a host for virtual machines |
 | `lima` | `prod` | the Lima test vehicle (`make lima`) |
 
@@ -66,6 +68,30 @@ An interpreter is the point of these forms, so posture's
 `programs-no-interpreters` fails on `php`, `node`, `python` and `jre` by
 design, as `kernel-no-hypervisor` does on `qemu-host`. `nginx` carries
 none.
+
+## Private configuration files
+
+Use `config NAME PATH` in a service file to give that service one file:
+
+```text
+config host-key /run/config/bastion/host_key
+```
+
+For service `sshd`, this creates `/run/svc/sshd/host-key`, owned by its
+user with mode `0600`. Point the program's configuration at that copy.
+The service cannot read the rest of `/run/config`.
+
+Sources must be beneath `/run/config`; destinations are plain names, not
+paths. A service may name up to 32 files, each at most 64 KiB. Missing or
+unreadable files keep it down. Contents are copied unchanged, never logged,
+and refreshed on each start, before any `before` command. Leash reads them
+as root but writes the copies only after dropping privileges and entering
+Landlock. Existing destination links are replaced, not followed.
+
+Put credentials in the boot config, not the image; see
+[cloud.md](cloud.md). These runtime copies disappear at reboot.
+For a value needed in an environment variable, use `secret NAME PATH`
+instead.
 
 ## Your application
 
