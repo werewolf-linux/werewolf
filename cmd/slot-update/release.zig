@@ -73,15 +73,21 @@ fn element(bytes: []const u8, index: u32, tag: der.Tag) !der.Element {
     return e;
 }
 
-/// Whether sig is key's signature of data.
+/// Whether sig is key's signature of data's SHA-256.
 pub fn verify(key: Key, data: []const u8, sig: []const u8) !void {
+    return verifyHash(Sha256, key, data, sig);
+}
+
+/// Whether sig is key's signature of data's Hash: SHA-256, or for apk's
+/// older indexes, SHA-1.
+pub fn verifyHash(comptime Hash: type, key: Key, data: []const u8, sig: []const u8) !void {
     if (sig.len != key.modulus.len) return error.BadSignature;
     const public_key = rsa.PublicKey.fromBytes(key.exponent, key.modulus) catch return error.BadKey;
     switch (key.modulus.len) {
         inline 256,
         384,
         512,
-        => |len| rsa.PKCS1v1_5Signature.verify(len, sig[0..len], data, public_key, Sha256) catch
+        => |len| rsa.PKCS1v1_5Signature.verify(len, sig[0..len], data, public_key, Hash) catch
             return error.BadSignature,
         else => return error.BadKey,
     }

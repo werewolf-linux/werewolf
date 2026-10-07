@@ -143,6 +143,7 @@ others hand it to a machine.
 ```
 --config DIR               files, as today: DIR/hostname, DIR/bastion/host_key, ...
 --hostname NAME            the hostname file
+--ip CIDR --gw ADDR --dns ADDR   the network file: a static address
 --data-key FILE            data.key: /data goes in LUKS2
 --NAME FILE                a file a service declared: --host-key, --authorized-keys, --auth-key
 --KEY VALUE[,VALUE...]     a setting a service declared: --destinations, --routes
@@ -168,8 +169,20 @@ long tail, and neither has to grow.
 
 A flag the form does not declare is an error that lists the flags it
 does. A file given both by `--config DIR` and by a flag is an error, not
-a precedence rule. The flags that do not come from a form are three,
-`--config`, `--hostname` and `--data-key`, and do not grow.
+a precedence rule. The flags that do not come from a form are werewolf's
+own files: `--config`, `--hostname`, `--ip`/`--gw`/`--dns`,
+`--data-key`, `--root-keys` and `--update-policy`, and grow only with
+werewolf's own programs.
+
+The `network` file is the kernel command line's own words, `werewolf.ip=
+werewolf.gw= werewolf.dns=`, each at most once and nothing else, for a
+machine no DHCP server gives an address: a hypervisor of your own, bare
+metal, or a form with no DHCP client. init reads it before the network
+comes up, and only when the command line has no `werewolf.ip`, which
+wins; `pack` checks it with init's own parser (`lib/network.zig`). On
+Lima, `create` gives a form with no DHCP client Lima's own network,
+`192.168.5.15/24` by `192.168.5.2`, which the Mac does not reach: its
+console does.
 
 The names are part of the form's interface, as the tar paths already
 are. A chain that declares the same name twice (a form on `prod-ssh`

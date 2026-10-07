@@ -7,7 +7,9 @@
 //! runs neither, so the VM has a second network, vzNAT, whose address this
 //! Mac reaches directly. Its MAC is the name's, hashed, so nothing records
 //! it; the disk's command line names it (werewolf.mac), so DHCP runs there,
-//! and macOS's DHCP server records the address it gave. Lima is the state:
+//! and macOS's DHCP server records the address it gave. A form with no
+//! DHCP client has no vzNAT: it takes Lima's own network from its config
+//! tar's network file, and its console says it is up. Lima is the state:
 //! `limactl list` says what exists, and nothing here remembers more.
 
 const std = @import("std");
@@ -17,6 +19,10 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 
 const leases = "/var/db/dhcpd_leases";
+/// Lima's own network, as every VM has it: the address it expects its
+/// guest at, and its gateway, which answers DNS too.
+pub const user_ip = "192.168.5.15/24";
+pub const user_gw = "192.168.5.2";
 /// How long create waits for the machine's address.
 const wait_seconds = 180;
 
@@ -79,16 +85,21 @@ pub fn dir(io: Io, gpa: Allocator, name: []const u8) !?[]const u8 {
     return if (r.term == .exited and r.term.exited == 0 and d.len > 0) d else null;
 }
 
-/// The Lima template: the disk, the vzNAT network, the config tar's disk,
-/// and nothing of Lima's own: no mounts, no ssh, no provisioning.
+/// The Lima template: the disk, the vzNAT network with MAC m, unless the
+/// form has no DHCP client to take an address there, the config tar's
+/// disk, and nothing of Lima's own: no mounts, no ssh, no provisioning.
 pub fn template(
     gpa: Allocator,
     form: []const u8,
     arch: []const u8,
     disk: []const u8,
-    m: []const u8,
+    m: ?[]const u8,
     config_disk: []const u8,
 ) ![]const u8 {
+    const net = if (m) |a|
+        try gpa.print("networks:\n  - vzNAT: true\n    macAddress: \"{s}\"\n", .{a})
+    else
+        "";
     return gpa.print(
         \\# Written by werewolf create. A disk that boots itself, and its config
         \\# tar as a second, unformatted disk; no cloud-init, no ssh.
@@ -101,15 +112,12 @@ pub fn template(
         \\images:
         \\  - location: "{s}"
         \\    arch: {s}
-        \\networks:
-        \\  - vzNAT: true
-        \\    macAddress: "{s}"
-        \\mounts: []
+        \\{s}mounts: []
         \\additionalDisks:
         \\  - name: "{s}"
         \\    format: false
         \\
-    , .{ form, arch, disk, arch, m, config_disk });
+    , .{ form, arch, disk, arch, net, config_disk });
 }
 
 /// The template for a machine Lima manages: make's, from boot/lima.yaml.in,
@@ -201,6 +209,21 @@ pub fn awaitAddress(io: Io, gpa: Allocator, m: []const u8, before: u64) !?[]cons
     return null;
 }
 
+/// Wait for init's "werewolf: up in" on the console, past the first seen bytes of
+/// its log: for a machine with no DHCP lease to say it is up.
+pub fn awaitUp(io: Io, gpa: Allocator, log: []const u8, seen: u64) !bool {
+    var waited: u32 = 0;
+    while (waited < wait_seconds) : (waited += 2) {
+        if (Dir.cwd().readFileAlloc(io, log, gpa, .limited(64 << 20))) |text| {
+            // A log shorter than before was started again.
+            const from = if (seen <= text.len) seen else 0;
+            if (std.mem.find(u8, text[from..], "werewolf: up in ") != null) return true;
+        } else |_| {}
+        try io.sleep(.fromSeconds(2), .awake);
+    }
+    return false;
+}
+
 const testing = std.testing;
 
 test mac {
@@ -244,6 +267,16 @@ test template {
     ) != null);
     try testing.expectEqualStrings("bastion", formOf(t).?);
     try testing.expect(!isManaged(t));
+    const plain = try template(
+        arena.allocator(),
+        "minimal",
+        "aarch64",
+        "/x/disk.img",
+        null,
+        "m-config",
+    );
+    try testing.expect(std.mem.find(u8, plain, "networks:") == null);
+    try testing.expect(std.mem.find(u8, plain, "    arch: aarch64\nmounts: []") != null);
     const mt = try managedTemplate(
         arena.allocator(),
         "vmType: vz\nplain: true\n",

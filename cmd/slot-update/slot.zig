@@ -5,12 +5,14 @@
 //! the Update of slot-update.zig, whose methods call these as their own.
 
 const std = @import("std");
+const apk = @import("apk.zig");
 const m = @import("slot-update.zig");
 const Io = m.Io;
 const Dir = m.Dir;
 const Allocator = m.Allocator;
 const linux = m.linux;
 const sandbox = m.sandbox;
+const releases = m.releases;
 const verity = m.verity;
 
 const apk_seconds = m.apk_seconds;
@@ -36,32 +38,37 @@ pub fn buildSlot(u: *Update, arch: []const u8, new_kernel: []const u8) !void {
     const io = u.io;
     const root = work_dir ++ "/root";
     try Dir.cwd().createDirPath(io, work_dir ++ "/slot");
+    const r: Root = try .open(u, root);
+    defer r.close(u);
 
     // What apko does that apk does not: busybox's links, no setuid or setgid.
     u.step = "root";
-    try u.busyboxLinks(root);
+    try busyboxLinks(u, r);
     // werewolf's own files as the build laid them, and the apk setup and
     // build record the next update will need.
-    for (try u.lines(try u.read(meta_dir ++ "/overlay"))) |p| try u.copyInto(root, p);
-    for (&[_][]const u8{ "etc/apk/repositories", "etc/apk/arch" }) |p| try u.copyInto(root, p);
-    for (try u.listDir("/etc/apk/keys")) |name| try u.copyInto(
-        root,
+    for (try u.lines(try u.read(meta_dir ++ "/overlay"))) |p| try copyInto(u, r, p);
+    for (&[_][]const u8{ "etc/apk/repositories", "etc/apk/arch" }) |p| try copyInto(u, r, p);
+    for (try u.listDir("/etc/apk/keys")) |name| try copyInto(
+        u,
+        r,
         try u.gpa.print("etc/apk/keys/{s}", .{name}),
     );
-    try u.copyTree(root, "usr/share/werewolf");
+    try copyTree(u, r, "usr/share/werewolf");
     const form = std.mem.trim(u8, try u.read(meta_dir ++ "/form"), "\n");
-    try u.write(
-        root ++ meta_dir ++ "/kernel",
+    try r.write(
+        u,
+        meta_dir ++ "/kernel",
         try u.gpa.print("{s}\n", .{new_kernel}),
     );
-    try u.write(
-        root ++ meta_dir ++ "/release",
+    try r.write(
+        u,
+        meta_dir ++ "/release",
         try u.gpa.print(
             "{s} {s} {s} updated-on-{s}\n",
             .{ form, try u.nowText(), new_kernel, u.host },
         ),
     );
-    try u.stripSetid(root);
+    try stripSetid(u, root);
     // The slot's / is this directory's owner and mode: root's, 0755,
     // whoever made it, or sshd's StrictModes refuses every key.
     _ = try u.sys(
@@ -98,60 +105,48 @@ pub fn buildSlot(u: *Update, arch: []const u8, new_kernel: []const u8) !void {
     // Alpine's arm64 kernel is an EFI zboot image; the slot carries the raw
     // Image inside it, as the build does (see Makefile).
     u.step = "vmlinuz";
-    const vmlinuz = try u.read(work_dir ++ "/kernel/boot/vmlinuz-virt");
+    const k: Root = try .open(u, work_dir ++ "/kernel");
+    defer k.close(u);
+    const vmlinuz = try k.read(u, "boot/vmlinuz-virt");
     try u.write(work_dir ++ "/slot/vmlinuz", try unwrapZboot(u.gpa, vmlinuz));
 
     u.step = "stage0";
     const s = work_dir ++ "/stage0";
-    try u.apkAdd(
+    try apkAdd(
+        u,
         s,
         arch,
-        &.{ "--keys-dir", "/etc/apk/keys", "--repositories-file", "/etc/apk/repositories" },
+        "/etc/apk/keys",
+        &.{ "--repositories-file", "/etc/apk/repositories" },
         try u.words(try u.read(meta_dir ++ "/stage0.world")),
     );
-    try u.busyboxLinks(s);
-    try u.stripSetid(s);
-    try Dir.cwd().copyFile(
-        meta_dir ++ "/stage0.init",
-        Dir.cwd(),
-        s ++ "/init",
-        io,
-        .{ .permissions = .fromMode(0o755) },
-    );
+    const s0: Root = try .open(u, s);
+    defer s0.close(u);
+    try busyboxLinks(u, s0);
+    try stripSetid(u, s);
+    // Where writeCpio puts the device nodes.
+    (try s0.makeDir(u, "dev")).close(io);
+    try s0.copy(u, meta_dir ++ "/stage0.init", "init", .fromMode(0o755));
     // werewolf's module loader, as the build lays it in stage0.
-    try Dir.cwd().copyFile(
-        "/usr/lib/werewolf/modload",
-        Dir.cwd(),
-        s ++ "/usr/lib/werewolf/modload",
-        io,
-        .{ .make_path = true, .permissions = .fromMode(0o755) },
-    );
-    const kvers = try u.listDir(work_dir ++ "/kernel/lib/modules");
+    try s0.copy(u, "/usr/lib/werewolf/modload", "usr/lib/werewolf/modload", .fromMode(0o755));
+    const kvers = try k.list(u, "lib/modules");
     if (kvers.len != 1) return error.NotOneKernel;
-    const src = try u.gpa.print(
-        "{s}/kernel/lib/modules/{s}",
-        .{ work_dir, kvers[0] },
-    );
-    const dst = try u.gpa.print("{s}/usr/lib/modules/{s}", .{ s, kvers[0] });
-    const dep = try u.read(try u.gpa.print("{s}/modules.dep", .{src}));
+    const src = try u.gpa.print("lib/modules/{s}", .{kvers[0]});
+    const dst = try u.gpa.print("usr/lib/modules/{s}", .{kvers[0]});
+    const dep = try k.read(u, try u.gpa.print("{s}/modules.dep", .{src}));
     const order = try moduleOrder(u.gpa, dep, try u.lines(try u.read(meta_dir ++ "/modules")));
     // Decompressed, as the build does: Alpine's kernel cannot, and the
     // loader hands it each file as it is.
     for (order) |p| {
-        const ko = try gunzip(
-            u.gpa,
-            try u.read(try u.gpa.print("{s}/{s}", .{ src, p })),
-        );
-        const out = try u.gpa.print("{s}/{s}", .{ dst, withoutGz(p) });
-        try Dir.cwd().createDirPath(io, parentDir(out));
-        try u.write(out, ko);
+        const ko = try gunzip(u.gpa, try k.read(u, try u.gpa.print("{s}/{s}", .{ src, p })));
+        try s0.write(u, try u.gpa.print("{s}/{s}", .{ dst, withoutGz(p) }), ko);
     }
     const list = try moduleList(u.gpa, order, try u.read(meta_dir ++ "/module-params"));
-    try u.write(try u.gpa.print("{s}/werewolf.modules", .{dst}), list);
+    try s0.write(u, try u.gpa.print("{s}/werewolf.modules", .{dst}), list);
     var line: Io.Writer.Allocating = .init(u.gpa);
     try tree.params.format(&line.writer);
-    try u.write(s ++ "/verity", line.written());
-    try u.writeCpio(s, work_dir ++ "/stage0.cpio");
+    try s0.write(u, "verity", line.written());
+    try writeCpio(u, s, work_dir ++ "/stage0.cpio");
     try u.run(&.{
         "/usr/bin/zstd",
         "-19",
@@ -168,7 +163,7 @@ pub fn buildSlot(u: *Update, arch: []const u8, new_kernel: []const u8) !void {
 // stage0 in /boot/werewolf, beside GRUB's directory. Both mounted apart
 // and writable, since /victim is read-only.
 pub fn install(u: *Update, build: []const u8) !void {
-    if (u.cmd.grubenv.len == 0) return u.installEsp(build);
+    if (u.cmd.grubenv.len == 0) return installEsp(u, build);
     const io = u.io;
     u.step = "install";
     const victim = try u.held(.victim);
@@ -228,13 +223,13 @@ pub fn install(u: *Update, build: []const u8) !void {
     // Then `attempt`, kept, and last the one try: a slot is armed only
     // with its attempt on record, and an attempt never outlives a try
     // that was not set.
-    try u.writeAttempt(build);
+    try writeAttempt(u, build);
     errdefer Dir.cwd().deleteFile(io, attempt_path) catch {};
     const entry = try u.gpa.print("werewolf-{s}", .{u.other});
     try u.run(&.{ "/usr/lib/werewolf/grub-setenv", env, "next_entry", entry });
 }
 
-pub fn writeAttempt(u: *Update, build: []const u8) !void {
+fn writeAttempt(u: *Update, build: []const u8) !void {
     try u.writeReplacing(
         attempt_path,
         try u.gpa.print("{s} {s} {s}\n", .{ u.other, build, try u.bootId() }),
@@ -247,7 +242,7 @@ pub fn writeAttempt(u: *Update, build: []const u8) !void {
 /// systemd-boot boots next because it is the newest. slot-keep removes the
 /// count once the slot is healthy; if it is not, systemd-boot has spent
 /// the try and boots the slot this one replaced.
-pub fn installEsp(u: *Update, build: []const u8) !void {
+fn installEsp(u: *Update, build: []const u8) !void {
     const io = u.io;
     u.step = "install";
     const victim = try u.held(.victim);
@@ -326,7 +321,7 @@ pub fn installEsp(u: *Update, build: []const u8) !void {
     const tmp = try u.gpa.print("{s}/werewolf-{s}.tmp", .{ entries, u.other });
     try u.write(tmp, entry);
     // `attempt` kept first, then the one try, as install does.
-    try u.writeAttempt(build);
+    try writeAttempt(u, build);
     errdefer Dir.cwd().deleteFile(io, attempt_path) catch {};
     try Dir.cwd().rename(
         tmp,
@@ -346,18 +341,20 @@ pub fn installEsp(u: *Update, build: []const u8) !void {
 /// Root does not touch the network. apk's network half runs first, as
 /// _update (apkFetcher): the indexes, fresh every time, since apk would
 /// otherwise trust a cached one for hours, and every package the new
-/// root takes, into the cache. Root takes the cache back and installs
-/// from it with --no-network, checking every signature and hash against
-/// its own keys, as apk always does. Then it prunes the cache to the
-/// packages the new root took, so it holds one copy of the image, no
-/// more.
+/// root takes, into the cache. Root takes the cache back, checks it
+/// against keys, the directory of keys its indexes must be signed with
+/// (checkCache), and installs from it with --no-network from repos, the
+/// repositories apk is told of. Then it prunes the cache to the packages
+/// the new root took, so it holds one copy of the image, no more.
 pub fn apkAdd(
     u: *Update,
     root: []const u8,
     arch: []const u8,
-    source: []const []const u8,
+    keys: []const u8,
+    repos: []const []const u8,
     packages: []const []const u8,
 ) !void {
+    const source = try std.mem.concat(u.gpa, []const u8, &.{ &.{ "--keys-dir", keys }, repos });
     const name = std.fs.path.basename(root);
     const cache = try u.gpa.printSentinel("{s}/{s}", .{ cache_dir, name }, 0);
     const scratch = try u.gpa.printSentinel(
@@ -415,7 +412,7 @@ pub fn apkAdd(
             64 << 10,
             apk_seconds,
         );
-        try u.reclaim(cache);
+        try reclaim(u, cache);
         const e = fetched catch |err| {
             u.detail = "apk, as _update";
             return err;
@@ -429,6 +426,7 @@ pub fn apkAdd(
         }
     }
     try Dir.cwd().deleteTree(u.io, scratch);
+    try checkCache(u, cache, keys);
 
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(
@@ -451,18 +449,60 @@ pub fn apkAdd(
     );
     try argv.appendSlice(u.gpa, packages);
     try u.run(argv.items);
-    try u.prune(cache, root);
+    try prune(u, cache, root);
+}
+
+/// The cache as root's apk may read it (apk.zig): each index signed by a
+/// key in keys, each package as an index lists it, and nothing else. A
+/// package no index lists any more is removed. One that is not as its
+/// index has it is removed too, for the next pass to fetch again, and
+/// fails this one.
+fn checkCache(u: *Update, cache: []const u8, keys: []const u8) !void {
+    var trusted: std.ArrayList(apk.Key) = .empty;
+    for (try u.listDir(keys)) |name| {
+        const path = try u.gpa.print("{s}/{s}", .{ keys, name });
+        try trusted.append(u.gpa, .{
+            .name = name,
+            .key = releases.parseKey(u.gpa, try u.read(path)) catch |err| {
+                u.detail = path;
+                return err;
+            },
+        });
+    }
+    var d = try Dir.cwd().openDir(u.io, cache, .{ .follow_symlinks = false });
+    defer d.close(u.io);
+    var idx: apk.Index = .empty;
+    const names = try u.listDir(cache);
+    for (names) |name| {
+        if (!std.mem.startsWith(u8, name, "APKINDEX.")) continue;
+        const kept = apk.readIndex(
+            u.gpa,
+            trusted.items,
+            &idx,
+            try d.readFileAlloc(u.io, name, u.gpa, .limited(max_read)),
+        ) catch |err| {
+            u.detail = try u.gpa.print("{s}/{s}", .{ cache, name });
+            return err;
+        };
+        try d.writeFile(u.io, .{ .sub_path = name, .data = kept });
+    }
+    for (names) |name| {
+        if (std.mem.startsWith(u8, name, "APKINDEX.")) continue;
+        apk.checkPackage(u.gpa, u.io, d, name, &idx) catch |err| {
+            try d.deleteFile(u.io, name);
+            if (err == error.NotInIndex) continue;
+            u.detail = try u.gpa.print("{s}/{s}", .{ cache, name });
+            return err;
+        };
+    }
 }
 
 /// The cache, down to the packages root has installed, and the indexes.
 /// Not apk's `cache clean`: without --purge it keeps any version an
 /// index still lists, which for Wolfi is all of them, and with it,
 /// where the root is on a disk, it deletes every package.
-pub fn prune(u: *Update, cache: []const u8, root: []const u8) !void {
-    const installed = try parseInstalled(
-        u.gpa,
-        try u.read(try u.gpa.print("{s}/lib/apk/db/installed", .{root})),
-    );
+fn prune(u: *Update, cache: []const u8, root: []const u8) !void {
+    const installed = try parseInstalled(u.gpa, try readIn(u, root, "lib/apk/db/installed"));
     var d = try Dir.cwd().openDir(u.io, cache, .{ .iterate = true, .follow_symlinks = false });
     defer d.close(u.io);
     var old: std.ArrayList([]const u8) = .empty;
@@ -477,7 +517,7 @@ pub fn prune(u: *Update, cache: []const u8, root: []const u8) !void {
 /// The cache, root's again once the fetcher is gone: each entry a regular
 /// file of a name apk gives one, owned by root, mode 0644. Anything else
 /// it left is removed unread.
-pub fn reclaim(u: *Update, cache: [:0]const u8) !void {
+fn reclaim(u: *Update, cache: [:0]const u8) !void {
     _ = try u.sys(
         linux.fchownat(linux.AT.FDCWD, cache, 0, 0, linux.AT.SYMLINK_NOFOLLOW),
         "chown cache",
@@ -502,25 +542,16 @@ pub fn reclaim(u: *Update, cache: [:0]const u8) !void {
     for (strays.items) |stray| try d.deleteTree(u.io, stray);
 }
 
-pub fn busyboxLinks(u: *Update, root: []const u8) !void {
-    const d = try u.gpa.print("{s}/etc/busybox-paths.d", .{root});
-    for (u.listDir(d) catch return) |name| {
-        for (try u.lines(try u.read(try u.gpa.print(
-            "{s}/{s}",
-            .{ d, name },
-        )))) |p| {
-            const link = try u.gpa.print(
-                "{s}/{s}",
-                .{ root, std.mem.trimStart(u8, p, "/") },
-            );
-            _ = Dir.cwd().statFile(u.io, link, .{ .follow_symlinks = false }) catch {
-                try Dir.cwd().symLink(u.io, "/usr/bin/busybox", link, .{});
-            };
+fn busyboxLinks(u: *Update, r: Root) !void {
+    const d = "etc/busybox-paths.d";
+    for (r.list(u, d) catch return) |name| {
+        for (try u.lines(try r.read(u, try u.gpa.print("{s}/{s}", .{ d, name })))) |p| {
+            if (!try r.exists(u, p)) try r.symLink(u, "/usr/bin/busybox", p);
         }
     }
 }
 
-pub fn stripSetid(u: *Update, root: []const u8) !void {
+fn stripSetid(u: *Update, root: []const u8) !void {
     var d = try Dir.cwd().openDir(u.io, root, .{ .iterate = true });
     defer d.close(u.io);
     var w = try d.walk(u.gpa);
@@ -539,10 +570,9 @@ pub fn stripSetid(u: *Update, root: []const u8) !void {
     }
 }
 
-/// Copy /path to root/path, with its permissions.
-/// path, a directory, and everything under it, from this root into
-/// root: the build record, whose etc/ holds the image's accounts.
-pub fn copyTree(u: *Update, root: []const u8, path: []const u8) !void {
+/// path, a directory, and everything under it, from this root into r:
+/// the build record, whose etc/ holds the image's accounts.
+fn copyTree(u: *Update, r: Root, path: []const u8) !void {
     var d = Dir.cwd().openDir(
         u.io,
         try u.gpa.print("/{s}", .{path}),
@@ -556,47 +586,32 @@ pub fn copyTree(u: *Update, root: []const u8, path: []const u8) !void {
     defer w.deinit();
     while (try w.next(u.io)) |e| {
         if (e.kind == .directory) continue;
-        try u.copyInto(root, try u.gpa.print("{s}/{s}", .{ path, e.path }));
+        try copyInto(u, r, try u.gpa.print("{s}/{s}", .{ path, e.path }));
     }
 }
 
-/// path, from this root into root. A symlink stays a symlink: a form's
-/// `run` that links to a binary must not become a copy of the old one.
-/// A .mountpoint is the empty file that keeps a mount point's directory
-/// in the image; here what is mounted there hides it, so it is made.
-pub fn copyInto(u: *Update, root: []const u8, path: []const u8) !void {
+/// path, from this root into r, with its permissions. A symlink stays a
+/// symlink: a form's `run` that links to a binary must not become a copy
+/// of the old one. A .mountpoint is the empty file that keeps a mount
+/// point's directory in the image; here what is mounted there hides it,
+/// so it is made.
+fn copyInto(u: *Update, r: Root, path: []const u8) !void {
     errdefer u.detail = path;
+    if (std.mem.eql(u8, std.fs.path.basename(path), ".mountpoint")) return r.write(u, path, "");
     const src = try u.gpa.print("/{s}", .{path});
-    const dst = try u.gpa.print("{s}/{s}", .{ root, path });
-    if (std.mem.eql(u8, std.fs.path.basename(path), ".mountpoint")) {
-        try Dir.cwd().createDirPath(u.io, parentDir(dst));
-        return Dir.cwd().writeFile(u.io, .{ .sub_path = dst, .data = "" });
-    }
     var buf: [Dir.max_path_bytes]u8 = undefined;
     const n = Dir.cwd().readLink(u.io, src, &buf) catch |err| switch (err) {
-        error.NotLink => return Dir.cwd().copyFile(
-            src,
-            Dir.cwd(),
-            dst,
-            u.io,
-            .{ .make_path = true },
-        ),
+        error.NotLink => return r.copy(u, src, path, null),
         else => return err,
     };
-    try Dir.cwd().createDirPath(u.io, parentDir(dst));
-    Dir.cwd().deleteFile(u.io, dst) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    };
-    try Dir.cwd().symLink(u.io, buf[0..n], dst, .{});
+    try r.symLink(u, buf[0..n], path);
 }
 
 /// A newc cpio of everything under root, as the kernel unpacks an
-/// initramfs: owned by root, children after their directory. The type
-/// and device numbers come from statx, since the stage0 root has device
-/// nodes (/dev/console, which the kernel opens before anything mounts
-/// /dev) as well as files, directories and links.
-pub fn writeCpio(u: *Update, root: []const u8, out_path: []const u8) !void {
+/// initramfs: owned by root, children after their directory, and last the
+/// device nodes the build's stage0 has (devices). The type and device
+/// numbers come from statx.
+fn writeCpio(u: *Update, root: []const u8, out_path: []const u8) !void {
     var out: Io.Writer.Allocating = .init(u.gpa);
     var d = try Dir.cwd().openDir(u.io, root, .{ .iterate = true });
     defer d.close(u.io);
@@ -634,8 +649,167 @@ pub fn writeCpio(u: *Update, root: []const u8, out_path: []const u8) !void {
         };
         try cpioEntry(&out.writer, node, data);
     }
+    for (devices) |dev| {
+        var n = dev;
+        n.ino = ino;
+        ino += 1;
+        try cpioEntry(&out.writer, n, "");
+    }
     try cpioEntry(&out.writer, .{ .name = "TRAILER!!!", .mode = 0, .ino = 0 }, "");
     try u.write(out_path, out.written());
+}
+
+// --- the new roots ------------------------------------------------------------
+
+/// A root being built, every path in it resolved as the slot will resolve
+/// it (openat2, RESOLVE_IN_ROOT): a symlink a package laid leads within
+/// the root, whatever it names, and never out into the running system.
+/// Each file written is made anew, never written through a link.
+const Root = struct {
+    dir: Dir,
+
+    fn open(u: *Update, path: []const u8) !Root {
+        return .{ .dir = try Dir.cwd().openDir(u.io, path, .{ .follow_symlinks = false }) };
+    }
+
+    fn close(r: Root, u: *Update) void {
+        r.dir.close(u.io);
+    }
+
+    /// path, a file in the root, whole.
+    fn read(r: Root, u: *Update, path: []const u8) ![]const u8 {
+        const f: Io.File = .{
+            .handle = try r.openIn(u, path, .{ .ACCMODE = .RDONLY }),
+            .flags = .{ .nonblocking = false },
+        };
+        defer f.close(u.io);
+        var buf: [64 << 10]u8 = undefined;
+        var reader = f.reader(u.io, &buf);
+        return reader.interface.allocRemaining(u.gpa, .limited(max_read)) catch |err| switch (err) {
+            error.ReadFailed => return reader.err orelse error.ReadFailed,
+            else => return err,
+        };
+    }
+
+    /// The names in path, a directory in the root.
+    fn list(r: Root, u: *Update, path: []const u8) ![]const []const u8 {
+        const d: Dir = .{ .handle = try r.openIn(u, path, dir_flags) };
+        defer d.close(u.io);
+        var names: std.ArrayList([]const u8) = .empty;
+        var it = d.iterate();
+        while (try it.next(u.io)) |e| try names.append(u.gpa, try u.gpa.dupe(u8, e.name));
+        return names.items;
+    }
+
+    /// Whether path is in the root, as a link or anything else.
+    fn exists(r: Root, u: *Update, path: []const u8) !bool {
+        const d: Dir = .{ .handle = r.openIn(
+            u,
+            parentDir(path),
+            dir_flags,
+        ) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        } };
+        defer d.close(u.io);
+        _ = d.statFile(
+            u.io,
+            std.fs.path.basename(path),
+            .{ .follow_symlinks = false },
+        ) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        return true;
+    }
+
+    fn write(r: Root, u: *Update, path: []const u8, data: []const u8) !void {
+        const d, const name = try r.fresh(u, path);
+        defer d.close(u.io);
+        try d.writeFile(u.io, .{ .sub_path = name, .data = data, .flags = .{ .exclusive = true } });
+    }
+
+    /// src, from the running system, to path in the root, with mode, or
+    /// src's if null.
+    fn copy(
+        r: Root,
+        u: *Update,
+        src: []const u8,
+        path: []const u8,
+        mode: ?Io.File.Permissions,
+    ) !void {
+        const d, const name = try r.fresh(u, path);
+        defer d.close(u.io);
+        try Dir.cwd().copyFile(src, d, name, u.io, .{ .permissions = mode, .replace = false });
+    }
+
+    fn symLink(r: Root, u: *Update, target: []const u8, path: []const u8) !void {
+        const d, const name = try r.fresh(u, path);
+        defer d.close(u.io);
+        try d.symLink(u.io, target, name, .{});
+    }
+
+    /// path's directory, made if missing, and its name there, removed if
+    /// it was there: what is written there is made anew.
+    fn fresh(r: Root, u: *Update, path: []const u8) !struct { Dir, []const u8 } {
+        const d = try r.makeDir(u, parentDir(path));
+        errdefer d.close(u.io);
+        const name = std.fs.path.basename(path);
+        d.deleteFile(u.io, name) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+        return .{ d, name };
+    }
+
+    /// path, a directory in the root, made if missing, each directory
+    /// above it too.
+    fn makeDir(r: Root, u: *Update, path: []const u8) !Dir {
+        if (r.openIn(u, path, dir_flags)) |fd| return .{ .handle = fd } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        }
+        if (path.len == 0) return error.FileNotFound;
+        const parent = try r.makeDir(u, parentDir(path));
+        defer parent.close(u.io);
+        const name = try u.gpa.dupeSentinel(u8, std.fs.path.basename(path), 0);
+        const rc = linux.mkdirat(parent.handle, name, 0o755);
+        if (linux.errno(rc) != .EXIST) _ = try u.sys(rc, "mkdir in a new root");
+        return .{ .handle = try r.openIn(u, path, dir_flags) };
+    }
+
+    /// path, opened beneath the root as if the root were /, through no
+    /// magic link (/proc/self/fd/N and the like).
+    fn openIn(r: Root, u: *Update, path: []const u8, flags: linux.O) !i32 {
+        const OpenHow = extern struct { flags: u64, mode: u64, resolve: u64 };
+        const RESOLVE_NO_MAGICLINKS = 0x02;
+        const RESOLVE_IN_ROOT = 0x10;
+        var o = flags;
+        o.CLOEXEC = true;
+        var how: OpenHow = .{
+            .flags = @as(u32, @bitCast(o)),
+            .mode = 0,
+            .resolve = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
+        };
+        const rc = linux.syscall4(
+            .openat2,
+            @bitCast(@as(isize, r.dir.handle)),
+            @intFromPtr((try u.gpa.dupeSentinel(u8, if (path.len == 0) "." else path, 0)).ptr),
+            @intFromPtr(&how),
+            @sizeOf(OpenHow),
+        );
+        if (linux.errno(rc) == .NOENT) return error.FileNotFound;
+        return @intCast(try u.sys(rc, "open in a new root"));
+    }
+
+    const dir_flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true };
+};
+
+/// path in the root at root, whole (Root.read).
+pub fn readIn(u: *Update, root: []const u8, path: []const u8) ![]const u8 {
+    const r: Root = try .open(u, root);
+    defer r.close(u);
+    return r.read(u, path);
 }
 
 // --- apk's network half, as _update -----------------------------------------
@@ -1017,6 +1191,50 @@ const Node = struct {
     rdev_minor: u32 = 0,
 };
 
+/// The device nodes in the build's stage0, with its modes: apko makes them,
+/// apk does not (cmd/stage0/stage0.yaml). The kernel opens /dev/console as
+/// PID 1's stdin, stdout and stderr before anything mounts /dev; without
+/// it stage0 and modload start with none, and what they say is lost or
+/// lands in the first file they open. Root here may not make device files
+/// (fence), and needs none: they go into the cpio as they are.
+const devices = [_]Node{
+    .{
+        .name = "dev/console",
+        .mode = linux.S.IFCHR | 0o620,
+        .ino = 0,
+        .rdev_major = 5,
+        .rdev_minor = 1,
+    },
+    .{
+        .name = "dev/null",
+        .mode = linux.S.IFCHR | 0o666,
+        .ino = 0,
+        .rdev_major = 1,
+        .rdev_minor = 3,
+    },
+    .{
+        .name = "dev/random",
+        .mode = linux.S.IFCHR | 0o666,
+        .ino = 0,
+        .rdev_major = 1,
+        .rdev_minor = 8,
+    },
+    .{
+        .name = "dev/urandom",
+        .mode = linux.S.IFCHR | 0o666,
+        .ino = 0,
+        .rdev_major = 1,
+        .rdev_minor = 9,
+    },
+    .{
+        .name = "dev/zero",
+        .mode = linux.S.IFCHR | 0o666,
+        .ino = 0,
+        .rdev_major = 1,
+        .rdev_minor = 5,
+    },
+};
+
 /// One newc cpio entry: header, name and data, each padded to 4 bytes.
 fn cpioEntry(w: *Io.Writer, n: Node, data: []const u8) !void {
     const fields = [_]u32{
@@ -1048,6 +1266,51 @@ fn pad4(n: usize) usize {
 }
 
 // --- tests ------------------------------------------------------------------
+
+test "a new root's links lead within it" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    var u: Update = .{ .io = io, .gpa = a };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // outside/, which no link in root/ may reach: by an absolute path, up
+    // out of the root, or as the file a name in the root links to. Up out
+    // of the root is the root, as for /.. on the slot, so etc/up is the
+    // root's own outside/.
+    try tmp.dir.createDirPath(io, "root/etc");
+    try tmp.dir.createDirPath(io, "root/outside");
+    try tmp.dir.createDirPath(io, "outside");
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside/file", .data = "kept" });
+    const outside = try tmp.dir.realPathFileAlloc(io, "outside", a);
+    try tmp.dir.symLink(io, outside, "root/usr", .{});
+    try tmp.dir.symLink(io, "../../outside", "root/etc/up", .{});
+    try tmp.dir.symLink(io, try a.print("{s}/file", .{outside}), "root/etc/passwd", .{});
+
+    const r: Root = try .open(&u, try tmp.dir.realPathFileAlloc(io, "root", a));
+    defer r.close(&u);
+    try testing.expectError(error.FileNotFound, r.write(&u, "usr/share/x", "out"));
+    try testing.expectError(error.FileNotFound, r.read(&u, "usr/file"));
+    try r.write(&u, "etc/up/y", "in");
+    try r.write(&u, "etc/passwd", "new");
+    try r.symLink(&u, "/usr/bin/busybox", "etc/up/sh");
+    try testing.expectEqualStrings(
+        "in",
+        try tmp.dir.readFileAlloc(io, "root/outside/y", a, .unlimited),
+    );
+    try testing.expectEqualStrings("new", try r.read(&u, "etc/passwd"));
+    try testing.expect(try r.exists(&u, "etc/up/sh"));
+    try testing.expect(!try r.exists(&u, "etc/up/missing"));
+
+    var d = try tmp.dir.openDir(io, "outside", .{ .iterate = true });
+    defer d.close(io);
+    var it = d.iterate();
+    try testing.expectEqualStrings("file", (try it.next(io)).?.name);
+    try testing.expectEqual(null, try it.next(io));
+    try testing.expectEqualStrings("kept", try d.readFileAlloc(io, "file", a, .unlimited));
+}
 
 test "systemd-boot entries" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);

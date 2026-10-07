@@ -100,7 +100,10 @@ so init asks QEMU's DHCP server: the address, gateway and DNS server must
 be applied, the console must show the client's `bound` event, and the
 client must be split as it says it is, an engine running as `_dhcp`,
 chrooted, with no capabilities, under seccomp, and a parent keeping
-`CAP_NET_ADMIN` alone.
+`CAP_NET_ADMIN` alone. Another, `check-static`, boots `minimal`, which has no DHCP client,
+without one too, and with a config tar from `werewolf pack --ip --gw --dns`
+([test/checks-static](../test/checks-static)): init must take the address,
+route and DNS server from the tar's `network` file, and say so.
 
 The slot boot covers what direct boot cannot: stage0 finding `root.erofs`
 by filesystem UUID, `/victim` read-only, the `slot-keep`
@@ -267,8 +270,8 @@ werewolf: up in 1.470s (the kernel 0.225s, userland 1.245s), handing over to run
 | Phase | Until |
 |---|---|
 | `kernel` | stage0 starts |
-| `modules` | stage0's modload closes the loader |
-| `slot` | the slot's filesystem is found and mounted (a slot's boot only) |
+| `modules` | stage0's modload closes the loader, after the scan for the slot's disk it runs alongside |
+| `slot` | the slot's filesystem is mounted (a slot's boot only) |
 | `root` | `root.erofs` is mounted through dm-verity |
 | `mounts`, `sysctls`, `network`, `victim`, `config`, `data` | init's steps of those names end |
 | `seal` | init has sealed itself and started the mount broker and the DHCP renewal |

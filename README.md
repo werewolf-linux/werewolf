@@ -14,6 +14,10 @@ privilege-separated binaries for basic functions such as auto-updates. Images ar
 
 ## Secure by default
 
+- **[Would have stopped 48 of the 49 Linux exploits CISA has catalogued](docs/cve-mitigation-survey.md)**: every kernel and
+  base-system vulnerability in CISA's Known Exploited Vulnerabilities catalog since it began in 2021,
+  checked against what werewolf ships. The one left, a `futex` bug fixed in 2014, has a mitigation
+  werewolf declines on cost, and says why.
 - **Declarative, Reproducible**: Uses apko (YAML) to declare what software can run within a VM; nothing else will. 
 - **[Signed Binaries]**: by default, Werewolf only runs programs included in the build.
 - **[Landlock/Seccomp Everywhere](docs/design/lockdown.md)**: all programs inherit a secure-by-default: including disabling ptrace, io_uring, /dev/kmem
@@ -71,7 +75,9 @@ werewolf pack bastion -o edge.tar --authorized-keys ~/.ssh/id_ed25519.pub \
 `run` and `create` take the same flags. A tar packed by hand works too:
 init finds it raw on any block device or in the cloud's user data, and
 leaves it in `/run/config`, readable by root alone. `data.key` puts
-`/data` in LUKS2. See [docs/cloud.md](docs/cloud.md) and
+`/data` in LUKS2. Where no DHCP gives an address, `--ip 10.0.0.5/24 --gw
+10.0.0.1 --dns 10.0.0.1` gives one, in the tar's `network` file. See
+[docs/cloud.md](docs/cloud.md) and
 [docs/forms.md](docs/forms.md#settings).
 
 ## Forms

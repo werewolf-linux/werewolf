@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const ww = @import("werewolf.zig");
+const images = @import("image.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -78,20 +79,6 @@ pub fn machine(arch: []const u8) Machine {
         .{ .arch = "X86_64", .kind = "e2-small", .nic = "VIRTIO_NET" };
 }
 
-/// werewolf-FORM-ARCH-DIGEST: a GCP name, lower case, at most 63.
-pub fn imageName(
-    gpa: Allocator,
-    form: []const u8,
-    arch: []const u8,
-    digest: []const u8,
-) ![]const u8 {
-    return gpa.print("werewolf-{s}-{s}-{s}", .{
-        form,
-        if (std.mem.eql(u8, arch, "aarch64")) "arm64" else "x86-64",
-        digest[0..16],
-    });
-}
-
 /// The image of disk, a release's disk.qcow2: there already, or made from
 /// it through PROJECT-werewolf-images, whose upload is then deleted.
 pub fn ensureImage(
@@ -104,7 +91,7 @@ pub fn ensureImage(
     work: []const u8,
     why: *ww.Why,
 ) ![]const u8 {
-    const name = try imageName(gpa, form, arch, &try sha256(io, disk));
+    const name = try images.name(gpa, form, arch, &try images.sha256(io, disk));
     if (ask(
         io,
         gpa,
@@ -167,25 +154,6 @@ pub fn ensureImage(
         try gpa.print("{s}={s}", .{ label, form }),
     }));
     return name;
-}
-
-/// The hex sha256 of a file.
-fn sha256(io: Io, path: []const u8) ![64]u8 {
-    var f = try Dir.cwd().openFile(io, path, .{});
-    defer f.close(io);
-    var h: std.crypto.hash.sha2.Sha256 = .init(.{});
-    var buf: [1 << 16]u8 = undefined;
-    while (true) {
-        const n = f.readStreaming(io, &.{&buf}) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => return err,
-        };
-        if (n == 0) break;
-        h.update(buf[0..n]);
-    }
-    var digest: [32]u8 = undefined;
-    h.final(&digest);
-    return std.fmt.bytesToHex(digest, .lower);
 }
 
 /// The form an instance was made from, as its label says; null if there is
@@ -318,28 +286,6 @@ pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *ww.Why) 
 }
 
 const testing = std.testing;
-
-test imageName {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const n = try imageName(
-        arena.allocator(),
-        "webshell-example",
-        "aarch64",
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    );
-    try testing.expectEqualStrings("werewolf-webshell-example-arm64-0123456789abcdef", n);
-    try testing.expect(n.len <= 63);
-    try testing.expectEqualStrings(
-        "werewolf-prod-x86-64-0123456789abcdef",
-        try imageName(
-            arena.allocator(),
-            "prod",
-            "x86_64",
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        ),
-    );
-}
 
 test booted {
     try testing.expect(!booted("stage0: ...\n"));

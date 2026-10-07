@@ -102,8 +102,9 @@ signature guards against a bad mirror, not against root on the machine.
 
 ## Trust
 
-apk fetches every package, checks every signature and compares every
-version. The updater decides nothing about trust.
+apk fetches every package; root checks every signature and hash before
+apk reads one, and apk checks them again and compares every version. The
+updater decides nothing about trust: the keys do.
 
 The trust anchors are the Wolfi key apko installed in `/etc/apk/keys` and
 the two Alpine keys in `/etc/werewolf/alpine-keys`, which matched byte for
@@ -135,9 +136,17 @@ fork or clone at all; and fails `mount`, which apk tries in its root,
 with EPERM. Then root takes the cache back: the directory and every file
 become root's, and anything that is not a regular file with a name apk
 gives its cache (`APKINDEX.*.tar.gz`, `*.apk`, `installed`) is removed
-unread. Root's apk installs from it with `--no-network`, checking every
-index signature and package hash against root's keys, as it always
-does: the child decides nothing about trust, and a compromised one can
+unread. Before its apk reads a byte, root checks the cache itself
+(`cmd/slot-update/apk.zig`): each index's signature against the root's
+keys (`.SIGN.RSA256` is SHA-256, Alpine's `.SIGN.RSA` SHA-1), each
+package's control segment against the SHA-1 its index lists (`C:`), and
+the rest against the SHA-256 that control names (`datahash`). A package
+no index lists is removed; one that does not match fails the pass, and is
+removed for the next to fetch again. Root writes each index's signature
+segment anew and drops Alpine's package signatures, which the index
+vouches for, so apk installs them as it does Wolfi's, which carry none.
+Root's apk then installs with `--no-network`, checking the same again:
+the child decides nothing about trust, and a compromised one can
 withhold packages, or offer an older index, which `compare` refuses. Its
 files are capped at 1 GiB each. Last, root prunes the cache to the
 packages the new root took.
@@ -180,11 +189,10 @@ The source's `error` says what happened to a child: its own word
 `ChildSaidTooMuch`, `ChildSaidNonsense`, `BadLine`.
 
 Root still runs apk, offline, to install, and `mkfs.erofs` and `zstd` to
-build, each by its full path. `mkfs.erofs` and `zstd` read only what root
-made. apk is the one exception: to check an index's signature, it must
-first decompress and unpack the file the child left, so root's apk parses
-bytes from below its trust line before it trusts them, as every apk does.
-Running that install in a child of its own is the next step.
+build, each by its full path, each killed if it runs 30 minutes. They read
+only what root made or checked. Root writes into the roots it builds
+through `openat2` with `RESOLVE_IN_ROOT`: a link a package laid resolves
+as it would on the slot, within the root, never into the running system.
 
 ## CVEs
 

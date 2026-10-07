@@ -261,13 +261,17 @@ endef
 
 # Leaf modules a form carries, from forms/<name>.modules along its include
 # chain, as its folders are. A line may start with an arch and a colon to
-# apply to that arch alone. modules.dep lists each leaf's transitive
-# dependencies; read back to front that is a load order, which is what
-# werewolf.modules holds and init insmods. No kmod index files travel, so
-# there is nothing describing the 880 modules that stay behind. init closes
-# the loader once these are in.
+# apply to that arch alone, or with @ and a filesystem and a colon, `@xfs:`,
+# for modules only a slot on that filesystem needs, a word `@xfs:xfs` here.
+# modules.dep lists each leaf's transitive dependencies; read back to front
+# that is a load order, which is what werewolf.modules holds and modload
+# loads. A dependency only such a filesystem needs is a line `@xfs PATH`,
+# which modload loads only when stage0 finds the slot on xfs. No kmod index
+# files travel, so there is nothing describing the 880 modules that stay
+# behind. modload closes the loader once these are in.
 MODULES := $(shell for f in $(CHAIN); do [ -f forms/$$f.modules ] && cat forms/$$f.modules; done | \
 	awk -v a=$(ARCH) '{ c = index($$0, sprintf("%c", 35)); if (c) $$0 = substr($$0, 1, c - 1) } \
+		$$1 ~ /^@[a-z0-9]+:$$/ { for (i = 2; i <= NF; i++) printf "%s%s ", $$1, $$i; print ""; next } \
 		$$1 ~ /:$$/ { if ($$1 != a ":") next; $$1 = "" } { print }')
 MODULE_LISTS := $(wildcard $(addprefix forms/,$(addsuffix .modules,$(CHAIN))))
 
@@ -316,8 +320,8 @@ LIMA_CONSOLE = $(if $(filter vz,$(VMTYPE)),hvc0,$(CONSOLE))
 
 # A target whose name starts with _ is a step another target runs, with
 # FORM set for it; `make help` lists the ones to type.
-.PHONY: all install-deps image slot bite-me disk run run-ssh lima lima-delete demo demo-delete webshell-demo _webshell-demo config-tar list-forms test check seal-learn check-slot check-updater check-updater-staged check-updater-release _check-updater check-nodata check-lease check-unsigned check-verity check-metadata check-dist check-gcp demo-gcp demo-gcp-delete webshell-gcp webshell-gcp-delete ci relock release-inputs dist posture clean help \
-	_check-form _check-shellfree-boot _check-slot-boot _check-updater-boot _check-nodata-boot _check-lease-boot _check-unsigned-boot _check-unsigned-slot _check-metadata-boots _dist-form _check-dist-disk _check-gcp
+.PHONY: all install-deps image slot bite-me disk run run-ssh lima lima-delete demo demo-delete webshell-demo _webshell-demo config-tar list-forms test check seal-learn check-slot check-updater check-updater-staged check-updater-release _check-updater check-nodata check-lease check-static check-unsigned check-verity check-metadata check-dist check-gcp demo-gcp demo-gcp-delete webshell-gcp webshell-gcp-delete ci relock release-inputs dist posture clean help \
+	_check-form _check-shellfree-boot _check-slot-boot _check-updater-boot _check-nodata-boot _check-lease-boot _check-static-boot _check-unsigned-boot _check-unsigned-slot _check-metadata-boots _dist-form _check-dist-disk _check-gcp
 
 all: image
 
@@ -392,18 +396,20 @@ $(OUT)/modules.tar: $(BUILD)/vmlinuz $(MODULE_LISTS) $(ALLOW_FILES) Makefile
 	dst=$(OUT)/modules/usr/lib/modules/$$kver; \
 	mkdir -p $$dst && : > $$dst/all && \
 	for m in $(MODULES); do \
-		paths=$$(awk -v m="$$m" '$$1 ~ ("/" m "\\.ko\\.gz:$$") { sub(":", "", $$1); for (i = NF; i >= 1; i--) print $$i }' $$src/modules.dep); \
-		[ -n "$$paths" ] || { echo "module $$m not in $$src/modules.dep" >&2; exit 1; }; \
-		echo "$$paths" >> $$dst/all; \
+		case $$m in @*) tag="$${m%%:*} " n=$${m#*:} ;; *) tag= n=$$m ;; esac; \
+		paths=$$(awk -v m="$$n" '$$1 ~ ("/" m "\\.ko\\.gz:$$") { sub(":", "", $$1); for (i = NF; i >= 1; i--) print $$i }' $$src/modules.dep); \
+		[ -n "$$paths" ] || { echo "module $$n not in $$src/modules.dep" >&2; exit 1; }; \
+		echo "$$paths" | sed "s|^|$$tag|" >> $$dst/all; \
 	done && \
-	awk '!seen[$$0]++' $$dst/all > $$dst/all.gz && rm $$dst/all && \
+	awk 'NR == FNR { if (NF == 1) base[$$1] = 1; next } \
+		NF == 1 ? !seen[$$0]++ : !($$2 in base) && !seen[$$0]++' $$dst/all $$dst/all > $$dst/all.gz && rm $$dst/all && \
 	sed 's/\.gz$$//' $$dst/all.gz | awk -v params='$(MODULE_PARAMS)' ' \
 		BEGIN { n = split(params, p, " "); for (i = 1; i <= n; i++) { c = index(p[i], ":"); \
 			m = substr(p[i], 1, c - 1); want[m] = want[m] " " substr(p[i], c + 1) } } \
 		{ m = $$0; sub(".*/", "", m); sub("\\.ko$$", "", m); if (m in want) { $$0 = $$0 want[m]; delete want[m] } print } \
 		END { for (m in want) { printf "module parameters for %s, which the form does not carry\n", m > "/dev/stderr"; exit 1 } }' \
 		> $$dst/werewolf.modules && \
-	for p in $$(cat $$dst/all.gz); do mkdir -p $$dst/$$(dirname $$p) && gunzip -c $$src/$$p > $$dst/$${p%.gz}; done && \
+	for p in $$(awk '{ print $$NF }' $$dst/all.gz | sort -u); do mkdir -p $$dst/$$(dirname $$p) && gunzip -c $$src/$$p > $$dst/$${p%.gz}; done && \
 	rm $$dst/all.gz
 	$(call layer,$(OUT)/modules)
 
@@ -466,12 +472,14 @@ endef
 # as "broker", lib/dm.zig, the device mapper, as "dm", lib/verity.zig,
 # dm-verity's hash tree, as "verity", lib/seal.zig, what the seal's
 # programs share, as "seal", lib/settings.zig, a service's declared
-# settings, as "settings", and lib/update-policy.zig, when a staged update
-# boots, as "update-policy", compiled with them, as ReleaseSafe as it is.
+# settings, as "settings", lib/update-policy.zig, when a staged update
+# boots, as "update-policy", and lib/network.zig, a config tar's static
+# network, as "network", compiled with them, as ReleaseSafe as it is.
 ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep seal --dep settings \
-	--dep update-policy -Mroot=$(1) \
+	--dep update-policy --dep network -Mroot=$(1) \
 	-Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig -Mverity=lib/verity.zig \
-	-Mseal=lib/seal.zig -Msettings=lib/settings.zig -Mupdate-policy=lib/update-policy.zig
+	-Mseal=lib/seal.zig -Msettings=lib/settings.zig -Mupdate-policy=lib/update-policy.zig \
+	-Mnetwork=lib/network.zig
 
 define zig_build
 $(zig_check)
@@ -503,6 +511,7 @@ test:
 	zig test lib/verity.zig
 	zig test lib/settings.zig
 	zig test lib/update-policy.zig
+	zig test lib/network.zig
 	zig test boot/gpt.zig
 	zig test tools/cve-tiers.zig
 	zig test tools/kernel-config-check.zig
@@ -529,7 +538,7 @@ $(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar 
 	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $$d $(OUT)/meta/etc/apk && \
 	kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
 	echo $(FORM) > $$d/form && \
-	echo $(MODULES) | tr ' ' '\n' > $$d/modules && \
+	echo $(MODULES) | tr ' ' '\n' | sed 's/^@[a-z0-9]*://' > $$d/modules && \
 	for f in $$(for c in $(CHAIN_DIRS); do (cd $$c && ls etc/sv/*/service 2>/dev/null); done | LC_ALL=C sort -u); do \
 		w=; for c in $(CHAIN_DIRS); do [ -f $$c/$$f ] && w=$$c/$$f; done; sed -n 's/#.*//; s/^pledge[[:space:]]//p' $$w; \
 	done | tr -s ' \t' '\n\n' | grep . | LC_ALL=C sort -u | tr '\n' ' ' > $$d/pledge && \
@@ -622,7 +631,8 @@ cve-tiers: $(CVE_TIERS_BIN) $(LOCK)/kernel.lock.json
 WEREWOLF = build/host/werewolf
 .PHONY: werewolf
 werewolf: $(WEREWOLF)
-$(WEREWOLF): cmd/werewolf/werewolf.zig $(wildcard cmd/werewolf/*.zig) lib/settings.zig lib/update-policy.zig
+$(WEREWOLF): cmd/werewolf/werewolf.zig $(wildcard cmd/werewolf/*.zig) lib/settings.zig lib/update-policy.zig \
+	lib/network.zig
 	$(zig_check)
 	zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$@
 
@@ -902,7 +912,7 @@ DEBUGFS = $(firstword $(shell command -v debugfs) $(wildcard /opt/homebrew/opt/e
 check-forms:     $(addprefix check-,$(FORMS))
 check-shellfree: $(SHELLFREE_CHECKS)
 check-integrity: check-slot check-unsigned check-verity
-check-cloud:     check-metadata check-nodata check-lease
+check-cloud:     check-metadata check-nodata check-lease check-static
 
 check: check-forms check-shellfree check-integrity check-cloud check-persist
 	@echo "check: every form, and a slot, passed"
@@ -932,7 +942,7 @@ _check-native:
 # consoles kept in build/ARCH/check-learn; then each call once, by service
 # and the promise that would allow it. A boot that fails still says what
 # it called.
-SEAL_LEARN_CHECKS = $(addprefix check-,$(FORMS)) check-slot check-persist check-nodata check-lease check-unsigned check-metadata
+SEAL_LEARN_CHECKS = $(addprefix check-,$(FORMS)) check-slot check-persist check-nodata check-lease check-static check-unsigned check-metadata
 seal-learn: | $(CHECK_SHARED)
 	-@$(MAKE) --no-print-directory -k SEAL_LEARN=1 $(SEAL_LEARN_CHECKS)
 	@grep -aho 'seal-watch: {"event":"learned"[^}]*}' $(BUILD)/check-learn/*.log | \
@@ -1035,6 +1045,20 @@ _check-lease-boot:
 		-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_BOOT)"
 	@grep -a -q 'dhcp-client: {.*"event":"bound"' $(CHECK)/lease.log || \
 		{ echo "FAIL   lease              no \"bound\" event on the console"; exit 1; }
+
+# minimal, which has no DHCP client, with no werewolf.ip: its address from
+# the config tar's network file, as werewolf pack --ip writes it, read
+# before the network comes up. After minimal's own check, which builds the
+# same form in the same place.
+check-static: | $(CHECK_SHARED) check-minimal
+	@$(CHECK_MAKE) FORM=minimal _check-static-boot
+
+_check-static-boot: $(WEREWOLF)
+	@$(WEREWOLF) pack minimal -o $(CHECK)/static-config.tar \
+		--ip 10.0.2.15/24 --gw 10.0.2.2 --dns 10.0.2.3 >/dev/null
+	@test/boot static test/checks-static $(CHECK)/static.log $(CHECK_QEMU) \
+		-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_BOOT)" \
+		-drive file=$(CHECK)/static-config.tar,format=raw,if=virtio,readonly=on
 
 # A root image changed after its build must not boot: minimal's stage0,
 # then its root.erofs with one byte of the superblock changed, must stop

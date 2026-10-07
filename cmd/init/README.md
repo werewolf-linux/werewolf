@@ -39,15 +39,19 @@ and the form's filesystem tools, each by its full path.
 2. **The kernel**: lockdown raised to integrity, modules loaded and closed,
    then the protective sysctls. One the kernel refuses ends the boot, but
    for a container's read-only `/proc/sys`.
-3. **The network**: `iface-up` with the command line's address, or
-   `dhcp-client up`.
-4. **The config**, one tar: the victim's `config.tar`, or else the first
+3. **The config** on the machine's disks, one tar: the victim's `config.tar`, or else the first
    block device holding one; any other is said and ignored. A confined
    child extracts it to `/run/config`: root's uid without capabilities,
    Landlock on `/run/config` alone, seccomp of file calls; at most 256
    entries and 16 MiB, checked before anything is written. Beside it, a
    NoCloud volume, only if labelled `cidata`, adds a user, keys and Lima's
-   data files, never replacing the tar's. Failing both, `cloud-metadata`.
+   data files, never replacing the tar's. A seed's `network-config` is
+   not read.
+4. **The network**: `iface-up` with the command line's address, or else
+   the config tar's `network` file's (`lib/network.zig`, checked as
+   `werewolf pack` checks it), or else `dhcp-client up`. Then, where no
+   disk held a config, `cloud-metadata`; a `network` file it brings comes
+   too late, and is said and not read. Then the hostname and root's keys.
 5. **`/data`**: a directory beside the slots, RAM, or the disk labelled
    `werewolf-data`, in LUKS2 when the config has a `data.key` of 32 bytes
    or more. Anything it cannot use is left as it is, and `/data` is an

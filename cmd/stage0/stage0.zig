@@ -68,25 +68,47 @@ pub fn main(init: std.process.Init) !void {
         !writeFile(lockdown, "integrity")) fail("cannot raise lockdown", .{});
 
     // Every module the form needs, then the loader closes for good: the
-    // root that follows finds it closed and loads nothing.
-    if (!run(io, &.{"/usr/lib/werewolf/modload"})) say("not every module loaded; see above", .{});
+    // root that follows finds it closed and loads nothing. The slot's disk
+    // is looked for while the drivers load, its superblock needing none,
+    // and modload then told its filesystem, for the modules that alone
+    // needs (xfs's, btrfs's): none for werewolf's own ext4, or with no slot.
+    var loader: ?std.process.Child = std.process.spawn(io, .{
+        .argv = &.{"/usr/lib/werewolf/modload"},
+        .stdin = .pipe,
+    }) catch |err| blk: {
+        say("cannot run modload: {s}", .{@errorName(err)});
+        break :blk null;
+    };
+    const found = if (boot.slot.len > 0) findFilesystem(gpa, boot.uuid) else null;
+    if (loader) |*l| {
+        const name = if (found) |f| @tagName(f.kind) else "none";
+        l.stdin.?.writeStreamingAll(io, name) catch {};
+        l.stdin.?.writeStreamingAll(io, "\n") catch {};
+        l.stdin.?.close(io);
+        l.stdin = null;
+        const ok = if (l.wait(io)) |term| switch (term) {
+            .exited => |code| code == 0,
+            else => false,
+        } else |_| false;
+        if (!ok) say("not every module loaded; see above", .{});
+    }
     const modules_ms = bootMs();
 
     var img: [:0]const u8 = "/root.erofs";
     var slot_ms: u64 = 0;
     if (boot.slot.len > 0) {
-        const found = findFilesystem(gpa, boot.uuid) orelse fail("no filesystem {s}", .{boot.uuid});
+        const f = found orelse fail("no filesystem {s}", .{boot.uuid});
         mkdir("/victim");
         const rc = linux.mount(
-            found.dev,
+            f.dev,
             "/victim",
-            @tagName(found.kind),
+            @tagName(f.kind),
             MS.NOSUID | MS.NODEV | MS.NOEXEC,
             0,
         );
         if (linux.errno(rc) != .SUCCESS) fail(
             "cannot mount {s}: {s}",
-            .{ found.dev, @tagName(linux.errno(rc)) },
+            .{ f.dev, @tagName(linux.errno(rc)) },
         );
         img = try gpa.printSentinel(
             "/victim{s}/{s}/root.erofs",
@@ -284,13 +306,14 @@ const Kind = enum { ext4, xfs, btrfs };
 const Found = struct { dev: [:0]const u8, kind: Kind };
 
 /// The block device whose filesystem has uuid, waiting for it to appear:
-/// a disk's driver may still be probing when the modules are loaded.
+/// its driver is still loading, or probing, as the search begins. Looked
+/// for every 10 ms, so the boot goes on the moment it is there.
 fn findFilesystem(gpa: std.mem.Allocator, uuid: []const u8) ?Found {
     const want = parseUuid(uuid) orelse return null;
     var waited: usize = 0;
-    while (waited < find_for * 5) : (waited += 1) {
+    while (waited < find_for * 100) : (waited += 1) {
         if (scan(gpa, want)) |f| return f;
-        var ts: linux.timespec = .{ .sec = 0, .nsec = 200 * std.time.ns_per_ms };
+        var ts: linux.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
         _ = linux.nanosleep(&ts, null);
     }
     return null;
@@ -453,15 +476,6 @@ fn readAll(gpa: std.mem.Allocator, path: [:0]const u8) []const u8 {
 }
 
 /// Whether argv runs and exits 0, its output on the console with ours.
-fn run(io: std.Io, argv: []const []const u8) bool {
-    var child = std.process.spawn(io, .{ .argv = argv, .stdin = .ignore }) catch return false;
-    const term = child.wait(io) catch return false;
-    return switch (term) {
-        .exited => |code| code == 0,
-        else => false,
-    };
-}
-
 fn say(comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
     const line = std.mem.print(&buf, "stage0: " ++ fmt ++ "\n", args) catch return;

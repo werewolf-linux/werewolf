@@ -200,7 +200,13 @@ pub fn parseValues(
     while (it.next()) |e| {
         const i = for (settings, 0..) |s, i| {
             if (std.mem.eql(u8, s.name, e.key_ptr.*)) break i;
-        } else return refuse(diag, e.key_ptr.*, null, "not a setting of this service");
+        } else
+            // Named only if it could be a setting's name: nothing from
+            // outside the image reaches a log unchecked, nor at any length.
+            return if (isName(e.key_ptr.*))
+                refuse(diag, e.key_ptr.*, null, "not a setting of this service")
+            else
+                refuse(diag, "", null, "a key that is not a setting name");
         const s = settings[i];
         const v = e.value_ptr.*;
         if (s.list) {
@@ -711,9 +717,17 @@ test "the bastion renders as it did" {
 
     try testing.expectError(
         error.Invalid,
+        parseValues(gpa, &s, "{\"destinations\":[],\"permit-tty\":true}", &diag),
+    );
+    try testing.expectEqualStrings("permit-tty", diag.setting);
+    try testing.expectEqualStrings("not a setting of this service", diag.why);
+    // A key that could not be a setting's name is not echoed, whatever it holds.
+    try testing.expectError(
+        error.Invalid,
         parseValues(gpa, &s, "{\"destinations\":[],\"PermitTTY\":true}", &diag),
     );
-    try testing.expectEqualStrings("PermitTTY", diag.setting);
+    try testing.expectEqualStrings("", diag.setting);
+    try testing.expectEqualStrings("a key that is not a setting name", diag.why);
     try testing.expectError(
         error.Invalid,
         parseValues(gpa, &s, "{\"destinations\":[],\"destinations\":[]}", &diag),

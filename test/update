@@ -15,7 +15,7 @@
 # (docs/design/update-policy.md).
 # Then, from the disk: the report names both CVE sources with a sha256 and
 # no error; each apk cache kept its packages; slot b's root is root's, mode
-# 0755; GRUB will boot b once. Second boot, slot b: it must commit, and the
+# 0755; GRUB will boot b once; slot b's stage0 has the build's device nodes. Second boot, slot b: it must commit, and the
 # updater record that the update held. In neither boot may a seccomp
 # filter have killed anything. The consoles are DIR/update-1.log and
 # DIR/update-2.log.
@@ -149,6 +149,12 @@ check "GRUB boots slot b next" grep -a -q 'next_entry=werewolf-b' "$dir/victim.i
 # Second boot: what the update built.
 victim_dump /boot/werewolf/b/vmlinuz "$dir/b-vmlinuz"
 victim_dump /boot/werewolf/b/initramfs.zst "$dir/b-initramfs.zst"
+# The device nodes in a stage0, by type, mode and name: apko makes the
+# build's, and slot-update must write the same, /dev/console above all,
+# which the kernel gives stage0 as its stdin, stdout and stderr.
+devices() { zstd -dc "$1" | bsdtar -tvf - 2>/dev/null | awk '$1 ~ /^c/ { print $1, $NF }' | sort; }
+built=$(devices "$dir/initramfs.zst")
+check "slot b's stage0 has the build's device nodes" [ -n "$built" -a "$built" = "$(devices "$dir/b-initramfs.zst")" ]
 boot 2 b "$dir/b-vmlinuz" "$dir/b-initramfs.zst" '"event":"(commit|rollback|error)"' 900 "$@" || exit 1
 check "slot b committed, and the update held" grep -a -q '"event":"commit","slot":"b"' "$dir/update-2.log"
 check "the commit says how long each tier waited" grep -a -q '"event":"commit",.*"waited":{' "$dir/update-2.log"

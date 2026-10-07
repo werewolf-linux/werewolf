@@ -520,7 +520,8 @@ pub const Update = struct {
         try u.apkAdd(
             work_dir ++ "/root",
             arch,
-            &.{ "--keys-dir", "/etc/apk/keys", "--repositories-file", "/etc/apk/repositories" },
+            "/etc/apk/keys",
+            &.{ "--repositories-file", "/etc/apk/repositories" },
             try u.words(try u.read("/etc/apk/world")),
         );
         u.step = "kernel";
@@ -528,7 +529,8 @@ pub const Update = struct {
         try u.apkAdd(
             work_dir ++ "/kernel",
             arch,
-            &.{ "--keys-dir", "/etc/werewolf/alpine-keys", "--repository", alpine },
+            "/etc/werewolf/alpine-keys",
+            &.{ "--repository", alpine },
             &.{"linux-virt"},
         );
 
@@ -536,11 +538,11 @@ pub const Update = struct {
         const old_pkgs = try parseInstalled(u.gpa, try u.read("/lib/apk/db/installed"));
         const new_pkgs = try parseInstalled(
             u.gpa,
-            try u.read(work_dir ++ "/root/lib/apk/db/installed"),
+            try slot.readIn(u, work_dir ++ "/root", "lib/apk/db/installed"),
         );
         const kernel_pkgs = try parseInstalled(
             u.gpa,
-            try u.read(work_dir ++ "/kernel/lib/apk/db/installed"),
+            try slot.readIn(u, work_dir ++ "/kernel", "lib/apk/db/installed"),
         );
         const old_kernel = std.mem.trim(u8, try u.read(meta_dir ++ "/kernel"), "\n");
         const new_kernel = try u.gpa.print(
@@ -962,12 +964,8 @@ pub const Update = struct {
 
     pub const buildSlot = slot.buildSlot;
     pub const install = slot.install;
-    pub const writeAttempt = slot.writeAttempt;
-    pub const installEsp = slot.installEsp;
 
     pub const apkAdd = slot.apkAdd;
-    pub const prune = slot.prune;
-    pub const reclaim = slot.reclaim;
 
     /// A filesystem the mount broker mounts read-write for as long as it
     /// is held: fence's Landlock domain refuses this process mount(2)
@@ -979,12 +977,6 @@ pub const Update = struct {
             return err;
         };
     }
-
-    pub const busyboxLinks = slot.busyboxLinks;
-    pub const stripSetid = slot.stripSetid;
-    pub const copyTree = slot.copyTree;
-    pub const copyInto = slot.copyInto;
-    pub const writeCpio = slot.writeCpio;
 
     fn isBad(u: *Update, build: []const u8) bool {
         const bad = u.read(state_dir ++ "/bad") catch return false;
@@ -1198,7 +1190,7 @@ pub const Plan = struct {
     },
 };
 
-const Download = struct { fd: i32, size: usize, sha256: [64]u8 };
+pub const Download = struct { fd: i32, size: usize, sha256: [64]u8 };
 
 const Change = struct { name: []const u8, from: ?[]const u8, to: ?[]const u8 };
 const Source = struct {
@@ -1210,7 +1202,7 @@ const Source = struct {
 
 // --- pure functions, tested below -------------------------------------------
 
-const Cmdline = struct {
+pub const Cmdline = struct {
     victim: []const u8 = "",
     slot: []const u8 = "",
     grubenv: []const u8 = "",
@@ -1469,6 +1461,7 @@ test {
     _ = tiers;
     _ = stage;
     _ = slot;
+    _ = @import("apk.zig");
 }
 
 test rfc3339 {

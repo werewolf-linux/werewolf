@@ -11,8 +11,11 @@ werewolf runs Alpine's kernel, whose drivers (virtio, NVMe, filesystems,
 dm-verity, a cloud's NIC) are modules. Each form names the ones it needs;
 the build resolves their dependencies, decompresses them (Alpine's kernel
 cannot), and lists them in `/usr/lib/modules/RELEASE/werewolf.modules`, on
-the verified, read-only root. stage0 runs modload on a slot, and init on a
-RAM root; the second finds the loader closed already and says so.
+the verified, read-only root. stage0 runs it; init's run finds the loader
+closed already and says so. What only one filesystem needs (Rocky's xfs,
+Fedora's btrfs, which bite leaves) is listed `@xfs PATH`, and loads only
+on a slot that is on it: btrfs's raid6 alone timed itself for 0.17 s of
+every boot.
 
 ## Goals
 
@@ -23,7 +26,8 @@ RAM root; the second finds the loader closed already and says so.
 
 ## Non-Goals
 
-- Choosing modules at run time (udev, modprobe): the form decides at build.
+- Choosing modules at run time (udev, modprobe): the form decides at build,
+  and the boot only which filesystem's lines it needs.
 - Judging a module: the kernel does, by its signature.
 
 ## Detailed design
@@ -32,7 +36,9 @@ RAM root; the second finds the loader closed already and says so.
    or `module.sig_enforce`. Otherwise nothing loads, and the loader closes.
 2. **The list, strictly**: paths under `kernel/`, ending `.ko`, of plain
    characters, no `.`, `..` or empty parts, at most 256, each with
-   `KEY=VALUE` parameters of plain characters. One bad line, and none.
+   `KEY=VALUE` parameters of plain characters, and for a filesystem's own,
+   `@` and a name of 1 to 15 letters and digits first. One bad line, and
+   none.
 3. **Open everything first**, beneath the module directory with symlinks
    refused (`openat2`, `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`), and the two
    descriptors that close the loader and read it back.
@@ -42,6 +48,9 @@ RAM root; the second finds the loader closed already and says so.
 5. **Load** each by `finit_module` on its open file, so the kernel reads and
    checks what is on disk, not a copy. A module already built in counts as
    loaded; one whose hardware is absent (ENODEV, EOPNOTSUPP) as absent.
+   Untagged lines first; then one line from stdin, the filesystem stage0
+   found the slot on while these loaded (`none` without a slot), picks the
+   tagged lines to load. stdin ending unnamed loads them all, as before.
 6. **Close** the loader (`kernel.modules_disabled=1`) whatever happened,
    and read it back: the kernel's answer, not the write's, is reported.
 

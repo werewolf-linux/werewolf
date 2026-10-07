@@ -37,7 +37,11 @@ hcloud server create --name web-1 --user-data-from-file config.b64 ...
 az vm create --name web-1 --user-data config.tar ...
 ```
 
-There is no address to give: the machine asks DHCP.
+There is no address to give: the machine asks DHCP. A `network` file in
+the user data is not read, the network being up to fetch it; one on a
+config disk is, before the network comes up ([design/cli.md](design/cli.md#config-the-config-tar-from-flags)).
+A NoCloud seed's `network-config` (cloud-init's v1 and v2) is never read:
+the address comes from the command line, the config tar or DHCP.
 
 ## What happens at boot
 

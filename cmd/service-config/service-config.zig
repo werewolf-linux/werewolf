@@ -12,9 +12,15 @@
 //!
 //! It knows no service. A refusal is one line naming the service, the
 //! setting and why, never the value, and keeps the service down.
+//!
+//! It reads everything first, then holds itself to the calls that remain
+//! (lib/sandbox.zig): memory, unlinking and making the one file, writing
+//! it and its line, and exit. settings.json, from outside the image, is
+//! parsed only after that.
 
 const std = @import("std");
 const settings = @import("settings");
+const sandbox = @import("sandbox");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -43,7 +49,18 @@ pub fn main(init: std.process.Init) void {
 
 fn run(io: Io, gpa: Allocator, path: []const u8, service: []const u8) !void {
     var stdin = Io.File.stdin().readerStreaming(io, &.{});
-    const decl = try declarations(gpa, try stdin.interface.allocRemaining(gpa, .limited(64 << 10)));
+    var why: []const u8 = "";
+    const decl = declarations(
+        gpa,
+        try stdin.interface.allocRemaining(gpa, .limited(64 << 10)),
+        &why,
+    ) catch |err| switch (err) {
+        error.BadDeclaration => {
+            log(io, .{ .event = "settings", .service = service, .why = why });
+            return error.Refused;
+        },
+        else => return err,
+    };
     var dir = try Dir.cwd().openDir(io, path, .{ .follow_symlinks = false });
     defer dir.close(io);
     const input = try dir.readFileAlloc(
@@ -52,6 +69,11 @@ fn run(io: Io, gpa: Allocator, path: []const u8, service: []const u8) !void {
         gpa,
         .limited(settings.max_input + 1),
     );
+    const base = if (decl.render.from) |from|
+        try Dir.cwd().readFileAlloc(io, from, gpa, .limited(settings.max_input))
+    else
+        null;
+    try pledge();
 
     var diag: settings.Diagnostic = .{};
     const values = settings.parseValues(gpa, decl.settings, input, &diag) catch |err| switch (err) {
@@ -67,10 +89,6 @@ fn run(io: Io, gpa: Allocator, path: []const u8, service: []const u8) !void {
         },
         else => return err,
     };
-    const base = if (decl.render.from) |from|
-        try Dir.cwd().readFileAlloc(io, from, gpa, .limited(settings.max_input))
-    else
-        null;
     const output = settings.render(gpa, decl.settings, decl.render, values, base) catch |err|
         switch (err) {
             error.Invalid => return error.BaseNotAnObject,
@@ -100,13 +118,26 @@ const Declarations = struct {
     render: settings.Render,
 };
 
+/// What is left once every input is read: the arena's memory, replacing
+/// the one file in the service's directory, its writes, and exit, where
+/// Zig's I/O puts back the SIGIO handler it set. Any other call kills it,
+/// and leash keeps the service down.
+fn pledge() !void {
+    var f: sandbox.Filter = .{};
+    inline for (.{
+        "mmap",   "munmap", "mremap",       "unlinkat", "openat",
+        "writev", "close",  "rt_sigaction", "exit",     "exit_group",
+    }) |call| f.allow(call);
+    try f.install();
+}
+
 /// The `setting` and `render` lines leash passed, checked as leash checked
 /// them: it parsed the same lines with the same functions before it ran
-/// this, so a refusal here is a bug in one of the two.
-fn declarations(gpa: Allocator, text: []const u8) !Declarations {
+/// this, so a refusal here is a bug in one of the two, and why says which
+/// line.
+fn declarations(gpa: Allocator, text: []const u8, why: *[]const u8) !Declarations {
     var list: std.ArrayList(settings.Setting) = .empty;
     var r: ?settings.Render = null;
-    var why: []const u8 = "";
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         var words: std.ArrayList([]const u8) = .empty;
@@ -118,38 +149,54 @@ fn declarations(gpa: Allocator, text: []const u8) !Declarations {
         if (std.mem.eql(u8, key, "setting")) {
             try list.append(
                 gpa,
-                settings.parseSetting(rest, &why) catch return error.BadDeclaration,
+                settings.parseSetting(rest, why) catch return error.BadDeclaration,
             );
         } else if (std.mem.eql(u8, key, "render") and r == null) {
-            r = settings.parseRender(rest, &why) catch return error.BadDeclaration;
-        } else return error.BadDeclaration;
+            r = settings.parseRender(rest, why) catch return error.BadDeclaration;
+        } else {
+            why.* = "a line that is not one setting or the render";
+            return error.BadDeclaration;
+        }
     }
-    const render = r orelse return error.BadDeclaration;
-    settings.declare(gpa, list.items, render, &why) catch |err| switch (err) {
+    const render = r orelse {
+        why.* = "no render line";
+        return error.BadDeclaration;
+    };
+    settings.declare(gpa, list.items, render, why) catch |err| switch (err) {
         error.Invalid => return error.BadDeclaration,
         else => return err,
     };
     return .{ .settings = list.items, .render = render };
 }
 
+/// One JSON line on stderr; if it does not fit, a short one that says so,
+/// never nothing, since leash points at this line when it parks a service.
 fn log(io: Io, fields: anytype) void {
     var buf: [2048]u8 = undefined;
     var w: Io.Writer = .fixed(&buf);
-    w.writeAll("service-config: ") catch return;
-    std.json.Stringify.value(fields, .{ .emit_null_optional_fields = false }, &w) catch return;
-    w.writeByte('\n') catch return;
-    Io.File.stderr().writeStreamingAll(io, w.buffered()) catch {};
+    const line = if (format(&w, fields))
+        w.buffered()
+    else |_|
+        "service-config: {\"event\":\"settings\",\"why\":\"a line too long to say\"}\n";
+    Io.File.stderr().writeStreamingAll(io, line) catch {};
+}
+
+fn format(w: *Io.Writer, fields: anytype) !void {
+    try w.writeAll("service-config: ");
+    try std.json.Stringify.value(fields, .{ .emit_null_optional_fields = false }, w);
+    try w.writeByte('\n');
 }
 
 test declarations {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
+    var why: []const u8 = "";
     const d = try declarations(gpa,
         \\setting destinations addrport... as PermitOpen
         \\render conf destinations
         \\
-    );
+    , &why);
     try std.testing.expectEqualStrings("PermitOpen", d.settings[0].key.?);
     try std.testing.expectEqual(settings.Format.conf, d.render.format);
     for ([_][]const u8{
@@ -157,5 +204,9 @@ test declarations {
         "render conf x\nrender conf y\nsetting a ip\n",
         "setting a string\nrender conf x\n",
         "exec /bin/sh\nsetting a ip\nrender conf x\n",
-    }) |text| try std.testing.expectError(error.BadDeclaration, declarations(gpa, text));
+    }) |text| {
+        why = "";
+        try std.testing.expectError(error.BadDeclaration, declarations(gpa, text, &why));
+        try std.testing.expect(why.len > 0);
+    }
 }

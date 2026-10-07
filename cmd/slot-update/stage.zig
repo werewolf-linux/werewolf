@@ -467,7 +467,7 @@ pub const Pending = struct {
     medium: ?Seen = null,
     low: ?Seen = null,
 
-    const Seen = struct { seen: []const u8, subject: []const u8, evidence: []const u8 };
+    pub const Seen = struct { seen: []const u8, subject: []const u8, evidence: []const u8 };
 
     pub fn tier(p: *Pending, t: policy.Tier) *?Seen {
         return switch (t) {
@@ -508,7 +508,7 @@ pub const Pending = struct {
 };
 
 const Waited = struct { seen: []const u8, seconds: i64 };
-const Waits = struct {
+pub const Waits = struct {
     urgent: ?Waited = null,
     high: ?Waited = null,
     medium: ?Waited = null,

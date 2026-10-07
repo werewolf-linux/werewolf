@@ -49,6 +49,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const seal_lib = @import("seal");
 const sandbox = @import("sandbox");
+const network_file = @import("network");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -92,12 +93,16 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     phases.add("sysctls", bootMs());
-    m.network();
-    phases.add("network", bootMs());
+    // The config on the machine's disks first, since it may hold the
+    // network; the cloud's, which comes over the network, after it.
     m.victim();
     phases.add("victim", bootMs());
     m.config();
     phases.add("config", bootMs());
+    m.network();
+    phases.add("network", bootMs());
+    m.metadata();
+    phases.add("metadata", bootMs());
     m.data();
     phases.add("data", bootMs());
 
@@ -188,6 +193,9 @@ const Machine = struct {
     cmd: Cmdline = .{},
     victim_dir: []const u8 = "",
     nocloud_user: []const u8 = "",
+    /// Whether a config tar or a NoCloud seed was found on a disk, so the
+    /// cloud's metadata server is not asked.
+    configured: bool = false,
     /// Whether the address is DHCP's, for its renewal to be started.
     dhcp: bool = false,
 
@@ -355,20 +363,22 @@ const Machine = struct {
 
     // --- the network ---------------------------------------------------------
 
-    /// One address: the command line's, or else, in forms built on dhcp, the
-    /// network's DHCP server's. A static address is for machines whose
-    /// provider gives none by DHCP, or which bite took over and so keep the
-    /// victim's; werewolf's net (cmd/iface-up/iface-up.zig) applies it. DHCP is werewolf's
+    /// One address: the command line's, or else the config tar's network
+    /// file's, or else, in forms built on dhcp, the network's DHCP server's.
+    /// A static address is for machines whose provider gives none by DHCP,
+    /// or which bite took over and so keep the victim's; werewolf's net
+    /// (cmd/iface-up/iface-up.zig) applies it. DHCP is werewolf's
     /// own client (cmd/dhcp-client/dhcp-client.zig), which applies the lease, logs it, and
     /// keeps the resolvers in its own directory; its renewal starts before fence.
     fn network(m: *Machine) void {
         _ = m.run(&.{ "/usr/lib/werewolf/iface-up", "lo" });
         const nic = m.pickNic();
         m.routerAdvertisements(nic);
-        const c = m.cmd;
+        var from: []const u8 = "";
+        const c = m.staticNetwork(&from);
         if (nic.len == 0) {
-            if (c.mac.len > 0)
-                say("no network: no NIC with address {s}", .{c.mac})
+            if (m.cmd.mac.len > 0)
+                say("no network: no NIC with address {s}", .{m.cmd.mac})
             else
                 say("no network: no NIC", .{});
         } else if (c.ip.len > 0) {
@@ -387,7 +397,10 @@ const Machine = struct {
                 m.fmt("nameserver {s}\n", .{c.dns}),
                 0o644,
             );
-            say("{s} {s} via {s} dns {s}", .{ nic, c.ip, orNone(c.gw), orNone(c.dns) });
+            say(
+                "{s} {s} via {s} dns {s}, from {s}",
+                .{ nic, c.ip, orNone(c.gw), orNone(c.dns), from },
+            );
         } else if (executable("/usr/lib/werewolf/dhcp-client")) {
             m.dhcp = true;
             _ = linux.unlink("/run/resolv.conf");
@@ -398,8 +411,37 @@ const Machine = struct {
                 nic,
             })) say("no network: no DHCP lease for {s}; its renewal keeps asking", .{nic});
         } else {
-            say("no network: no werewolf.ip, and this form has no DHCP client", .{});
+            say(
+                "no network: no werewolf.ip, no network file in the config tar, and this form " ++
+                    "has no DHCP client",
+                .{},
+            );
         }
+    }
+
+    /// The static address, and where it came from: the command line's
+    /// werewolf.ip, or else the config tar's network file, checked as
+    /// werewolf pack checks it (lib/network.zig). The command line wins,
+    /// since whoever set it holds the boot; a file refused is said and
+    /// left, as if absent.
+    fn staticNetwork(m: *Machine, from: *[]const u8) network_file.Network {
+        const has_file = exists("/run/config/network");
+        if (m.cmd.ip.len > 0) {
+            if (has_file) say(
+                "network: the command line's, not the config tar's network file",
+                .{},
+            );
+            from.* = "the command line";
+            return .{ .ip = m.cmd.ip, .gw = m.cmd.gw, .dns = m.cmd.dns };
+        }
+        if (!has_file) return .{};
+        var why: []const u8 = "";
+        const n = network_file.parse(m.read("/run/config/network"), &why) orelse {
+            say("network: the config tar's network file refused: {s}", .{why});
+            return .{};
+        };
+        from.* = "the config tar";
+        return n;
     }
 
     /// The NIC: the one werewolf.mac names, or else the first but lo.
@@ -465,11 +507,12 @@ const Machine = struct {
     /// One config tar: the victim's config.tar, or else the first block
     /// device holding one ("ustar" at byte 257). Never a merge: any other is
     /// said and ignored, so a disk someone attached cannot quietly replace
-    /// root's keys. Then a NoCloud seed, but only the device labelled cidata,
-    /// found by blkid in its own process, so no other disk is ever mounted
-    /// to look. Where neither is found and the form has werewolf's cloud
-    /// program, the config comes from the cloud's metadata server, checked
-    /// and rewritten by that program first (docs/cloud.md).
+    /// root's keys. Then a NoCloud seed, but only an ISO9660 volume labelled
+    /// cidata, found in the same pass by its volume descriptor alone, so no
+    /// other disk is ever mounted to look, and no blkid probes every
+    /// superblock of every disk (85 ms on GCP's network disks, where there
+    /// is never a seed); the first, and any other said and ignored, as a
+    /// second tar is. Before the network, as the tar may hold its address.
     fn config(m: *Machine) void {
         var tar: ?[]const u8 = null;
         if (m.victim_dir.len > 0) {
@@ -479,9 +522,18 @@ const Machine = struct {
                 tar = t;
             }
         }
+        var seed_dev: ?[:0]const u8 = null;
         for (m.list("/sys/class/block")) |name| {
             const dev = m.fmtZ("/dev/{s}", .{name});
-            if (!isBlockDevice(dev) or !hasUstar(dev)) continue;
+            if (!isBlockDevice(dev)) continue;
+            if (isNoCloud(dev)) {
+                if (seed_dev) |s|
+                    say("NoCloud seed on {s} ignored: the seed is {s}", .{ dev, s })
+                else
+                    seed_dev = dev;
+                continue;
+            }
+            if (!hasUstar(dev)) continue;
             if (tar) |t| {
                 say("config tar on {s} ignored: the config is {s}", .{ dev, t });
                 continue;
@@ -492,26 +544,36 @@ const Machine = struct {
         if (tar) |t| m.extract(t);
 
         var seeded = false;
-        const cidata = for ([_][]const u8{ "LABEL=cidata", "LABEL=CIDATA" }) |want| {
-            const d = m.blkid(&.{ "-l", "-o", "device", "-t", want });
-            if (d.len > 0) break d;
-        } else "";
-        if (cidata.len > 0 and
-            m.runQuiet(&.{ mount_bin, "-t", "iso9660", "-o", "ro", cidata, "/mnt" }))
-        {
-            if (exists("/mnt/user-data")) {
-                say("NoCloud user-data on {s}", .{cidata});
-                seeded = true;
-                m.nocloud();
+        if (seed_dev) |cidata| {
+            if (m.runQuiet(&.{ mount_bin, "-t", "iso9660", "-o", "ro", cidata, "/mnt" })) {
+                if (exists("/mnt/user-data")) {
+                    say("NoCloud user-data on {s}", .{cidata});
+                    seeded = true;
+                    m.nocloud();
+                }
+                _ = linux.umount2("/mnt", 0);
             }
-            _ = linux.umount2("/mnt", 0);
         }
-        if (tar == null and !seeded and executable("/usr/lib/werewolf/cloud-metadata") and
+        m.configured = tar != null or seeded;
+    }
+
+    /// Where no disk held a config and the form has werewolf's cloud
+    /// program, the config from the cloud's metadata server, checked and
+    /// rewritten by that program first (docs/cloud.md); a network file in
+    /// it comes too late, the network being up to fetch it. Then the
+    /// hostname and root's keys, from whichever config there is.
+    fn metadata(m: *Machine) void {
+        if (!m.configured and executable("/usr/lib/werewolf/cloud-metadata") and
             m.run(&.{"/usr/lib/werewolf/cloud-metadata"}) and
             exists("/run/werewolf/cloud/config.tar"))
         {
             say("config tar from the cloud's metadata server", .{});
             m.extract("/run/werewolf/cloud/config.tar");
+            if (exists("/run/config/network"))
+                say(
+                    "network: the cloud's network file is not read: the network was up to fetch it",
+                    .{},
+                );
         }
 
         const name = if (exists("/run/config/hostname"))
@@ -1795,6 +1857,25 @@ fn hasUstar(dev: [:0]const u8) bool {
     return linux.errno(n) == .SUCCESS and n == 5 and std.mem.eql(u8, &magic, "ustar");
 }
 
+/// Whether dev is an ISO9660 volume labelled cidata (or CIDATA), as a
+/// NoCloud seed is: its primary volume descriptor, at 32 KiB, says CD001,
+/// and its volume identifier, from byte 40, is the label: padded with
+/// spaces, as the standard says, or with NULs, as Lima's and macOS's are.
+fn isNoCloud(dev: [:0]const u8) bool {
+    const fd = linux.open(dev, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    if (linux.errno(fd) != .SUCCESS) return false;
+    defer _ = linux.close(@intCast(fd));
+    var pvd: [72]u8 = undefined;
+    const n = linux.pread(@intCast(fd), &pvd, pvd.len, 0x8000);
+    return linux.errno(n) == .SUCCESS and n == pvd.len and isCidata(&pvd);
+}
+
+fn isCidata(pvd: *const [72]u8) bool {
+    if (pvd[0] != 1 or !std.mem.eql(u8, pvd[1..6], "CD001")) return false;
+    const volume = std.mem.trimEnd(u8, pvd[40..72], " \x00");
+    return std.mem.eql(u8, volume, "cidata") or std.mem.eql(u8, volume, "CIDATA");
+}
+
 fn writeFile(path: [:0]const u8, data: []const u8) bool {
     return writeErrno(path, data) == .SUCCESS;
 }
@@ -2028,4 +2109,29 @@ fn bootMs() u64 {
     var ts: linux.timespec = undefined;
     if (linux.errno(linux.clock_gettime(.BOOTTIME, &ts)) != .SUCCESS) return 0;
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
+}
+
+test isCidata {
+    var pvd: [72]u8 = @splat(' ');
+    pvd[0] = 1;
+    @memcpy(pvd[1..6], "CD001");
+    @memcpy(pvd[40..46], "cidata");
+    try testing.expect(isCidata(&pvd));
+    @memcpy(pvd[40..46], "CIDATA");
+    try testing.expect(isCidata(&pvd));
+    // Lima's seed, and macOS's hdiutil's, pad with NULs.
+    @memset(pvd[46..72], 0);
+    try testing.expect(isCidata(&pvd));
+    @memset(pvd[46..72], ' ');
+    // Another label, a label that only starts so, or no ISO9660 at all.
+    @memcpy(pvd[40..46], "config");
+    try testing.expect(!isCidata(&pvd));
+    @memcpy(pvd[40..47], "cidata2");
+    try testing.expect(!isCidata(&pvd));
+    @memcpy(pvd[40..47], "cidata ");
+    pvd[0] = 2; // a supplementary descriptor, not the primary
+    try testing.expect(!isCidata(&pvd));
+    pvd[0] = 1;
+    @memcpy(pvd[1..6], "BEA01");
+    try testing.expect(!isCidata(&pvd));
 }

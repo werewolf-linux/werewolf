@@ -25,11 +25,13 @@
 //!     config  host-key /run/config/bastion/host_key      --host-key FILE
 //!     setting destinations addrport... as PermitOpen     --destinations ADDR:PORT,...
 //!
-//! Five do not come from a form: --config DIR, a directory of files as
-//! they go in the tar; --hostname NAME; --data-key FILE; --root-keys FILE,
-//! root's authorized_keys, which init gives sshd; and --update-policy FILE, checked as slot-update
-//! applies it, over the
-//! form's own (lib/update-policy.zig). A FILE flag
+//! Others do not come from a form: --config DIR, a directory of files as
+//! they go in the tar; --hostname NAME; --ip CIDR, --gw ADDR and --dns
+//! ADDR, a static network for init where none gives one by DHCP
+//! (lib/network.zig); --data-key FILE; --root-keys FILE, root's
+//! authorized_keys, which init gives sshd; and --update-policy FILE,
+//! checked as slot-update applies it, over the form's own
+//! (lib/update-policy.zig). A FILE flag
 //! reads a file, or - for standard input, never a value on the line, so no
 //! secret is in ps or a shell history. A setting is checked with the
 //! guest's own functions (lib/settings.zig), so what pack accepts the
@@ -45,6 +47,7 @@
 const std = @import("std");
 const settings = @import("settings");
 const update_policy = @import("update-policy");
+const network = @import("network");
 const lima = @import("lima.zig");
 const gcp = @import("gcp.zig");
 const app = @import("app.zig");
@@ -144,14 +147,23 @@ const Interface = struct {
 };
 
 /// The files werewolf's own programs read from a config tar, each filled
-/// by a flag of werewolf's: init's hostname, data.key and root's
+/// by a flag of werewolf's: init's hostname, network, data.key and root's
 /// authorized_keys, and slot-update's update-policy.json.
-const own_files = [_][]const u8{ "hostname", "data.key", "authorized_keys", "update-policy.json" };
+const own_files = [_][]const u8{
+    "hostname",
+    "network",
+    "data.key",
+    "authorized_keys",
+    "update-policy.json",
+};
 
 /// The universal flags, which no service may declare.
 const reserved = [_][]const u8{
     "config",
     "hostname",
+    "ip",
+    "gw",
+    "dns",
     "data-key",
     "root-keys",
     "update-policy",
@@ -351,6 +363,10 @@ const Options = struct {
     platform: ?[]const u8 = null,
     config: ?[]const u8 = null,
     hostname: ?[]const u8 = null,
+    /// A static network: init's network file.
+    ip: ?[]const u8 = null,
+    gw: ?[]const u8 = null,
+    dns: ?[]const u8 = null,
     data_key: ?[]const u8 = null,
     update_policy: ?[]const u8 = null,
     root_keys: ?[]const u8 = null,
@@ -411,6 +427,12 @@ fn options(gpa: Allocator, args: []const []const u8, why: *Why) !Options {
             &o.config
         else if (std.mem.eql(u8, flag, "hostname"))
             &o.hostname
+        else if (std.mem.eql(u8, flag, "ip"))
+            &o.ip
+        else if (std.mem.eql(u8, flag, "gw"))
+            &o.gw
+        else if (std.mem.eql(u8, flag, "dns"))
+            &o.dns
         else if (std.mem.eql(u8, flag, "data-key"))
             &o.data_key
         else if (std.mem.eql(u8, flag, "update-policy"))
@@ -462,6 +484,21 @@ fn gather(io: Io, gpa: Allocator, iface: Interface, o: Options, why: *Why) ![]co
             gpa,
             &entries,
             .{ .path = "hostname", .data = try gpa.print("{s}\n", .{h}), .from = "--hostname" },
+            why,
+        );
+    }
+    if (o.ip != null or o.gw != null or o.dns != null) {
+        const ip = o.ip orelse return why.refuse("--gw and --dns want --ip", .{});
+        var buf: [network.max_len]u8 = undefined;
+        const text = network.format(
+            &buf,
+            .{ .ip = ip, .gw = o.gw orelse "", .dns = o.dns orelse "" },
+        ) catch
+            return why.refuse("--ip, --gw, --dns: over {d} bytes", .{network.max_len});
+        try add(
+            gpa,
+            &entries,
+            .{ .path = "network", .data = try gpa.dupe(u8, text), .from = "--ip" },
             why,
         );
     }
@@ -530,6 +567,11 @@ fn gather(io: Io, gpa: Allocator, iface: Interface, o: Options, why: *Why) ![]co
             else => return err,
         };
     }
+    // The network, as init reads it.
+    for (entries.items) |e| if (std.mem.eql(u8, e.path, "network")) {
+        var reason: []const u8 = "";
+        if (network.parse(e.data, &reason) == null) return why.refuse("network: {s}", .{reason});
+    };
     // The updater's policy, as slot-update applies it: werewolf's limits,
     // then the form's file, then the operator's.
     for (entries.items) |e| if (std.mem.eql(u8, e.path, "update-policy.json")) {
@@ -921,6 +963,9 @@ fn help(w: *Io.Writer, gpa: Allocator, verb: []const u8, form: []const u8, iface
     try w.print("{s}\nwerewolf {s} {s} takes:\n", .{ usage, verb, form });
     try row(w, "--config DIR", "files as they go in the tar");
     try row(w, "--hostname NAME", "hostname");
+    try row(w, "--ip CIDR", "network: an address, where no DHCP gives one");
+    try row(w, "--gw ADDR", "network: the default route");
+    try row(w, "--dns ADDR", "network: the resolver");
     try row(w, "--data-key FILE", "data.key: /data in LUKS2");
     try row(w, "--root-keys FILE", "authorized_keys: root's, where the form runs sshd");
     try row(w, "--update-policy FILE", "update-policy.json: when updates install");
@@ -1075,7 +1120,7 @@ fn platform(io: Io, gpa: Allocator, given: ?[]const u8) []const u8 {
 }
 
 fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
-    const o = try options(gpa, args, why);
+    var o = try options(gpa, args, why);
     if (o.out != null or o.check)
         return why.refuse("create takes no -o or -n: werewolf pack writes a tar", .{});
     const iface = try formInterface(io, gpa, o.form, why);
@@ -1092,6 +1137,24 @@ fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     );
 
     const on = platform(io, gpa, o.platform);
+    // A form with no DHCP client is given Lima's own network in its config
+    // tar, as make lima's template gives it on the command line, unless the
+    // flags or --config DIR give one.
+    const dhcp = !std.mem.eql(u8, on, "lima") or try hasDhcp(io, gpa, o.form, why);
+    if (!dhcp and o.ip == null and o.gw == null and o.dns == null) {
+        const given = if (o.config) |d|
+            if (Dir.cwd().access(io, try std.fs.path.join(gpa, &.{ d, "network" }), .{}))
+                true
+            else |_|
+                false
+        else
+            false;
+        if (!given) {
+            o.ip = lima.user_ip;
+            o.gw = lima.user_gw;
+            o.dns = lima.user_gw;
+        }
+    }
     const entries = try gather(io, gpa, iface, o, why);
     const tar = try writeTar(gpa, entries);
     if (target(on)) |t| if (misfit(
@@ -1171,9 +1234,19 @@ fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
                 ab.app,
                 "disk",
                 try gpa.print("DISK={s}", .{disk}),
-                try gpa.print("DISK_ARGS=werewolf.mac={s} console=hvc0", .{m}),
+                if (dhcp)
+                    try gpa.print("DISK_ARGS=werewolf.mac={s} console=hvc0", .{m})
+                else
+                    "DISK_ARGS=console=hvc0",
             });
-            template = try lima.template(gpa, o.form, arch, disk, &m, config_disk);
+            template = try lima.template(
+                gpa,
+                o.form,
+                arch,
+                disk,
+                if (dhcp) &m else null,
+                config_disk,
+            );
         }
         // A disk of that name left by a machine deleted with limactl alone.
         _ = std.process.run(
@@ -1200,8 +1273,13 @@ fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     }
 
     // limactl start waits for ssh, which never answers; the lease says the
-    // machine is up, and the VM outlives the start.
+    // machine is up, or with no DHCP, its console, and the VM outlives the
+    // start.
     const before = lima.previous(io, gpa, &m);
+    const console_log = try gpa.print("{s}/serialv.log", .{
+        try lima.dir(io, gpa, name) orelse return why.refuse("no machine {s}", .{name}),
+    });
+    const seen = if (Dir.cwd().statFile(io, console_log, .{})) |st| st.size else |_| 0;
     const log = try Dir.cwd().createFile(io, try gpa.print("{s}/start.log", .{dir}), .{});
     defer log.close(io);
     var starter = std.process.spawn(io, .{
@@ -1210,6 +1288,23 @@ fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
         .stdout = .{ .file = log },
         .stderr = .{ .file = log },
     }) catch |err| return why.refuse("limactl start: {s}", .{@errorName(err)});
+    if (!dhcp) {
+        say(io, "{s}: waiting for it to boot", .{name});
+        const up = try lima.awaitUp(io, gpa, console_log, seen);
+        starter.kill(io);
+        if (!up) return why.refuse(
+            "{s} is not up after 3 minutes: werewolf console {s}",
+            .{ name, name },
+        );
+        say(
+            io,
+            "{s} is up on Lima's own network, which this Mac does not reach: {s} has no " ++
+                "DHCP client for vzNAT. Its console: werewolf console {s}",
+            .{ name, o.form, name },
+        );
+        try w.print("{s}\t-\t{s}\n", .{ name, o.form });
+        return;
+    }
     say(io, "{s}: waiting for its address", .{name});
     const ip = try lima.awaitAddress(io, gpa, &m, before);
     starter.kill(io);
@@ -1219,6 +1314,17 @@ fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
             .{ name, name },
         );
     try w.print("{s}\t{s}\t{s}\n", .{ name, addr, o.form });
+}
+
+/// Whether form takes an address by DHCP: whether it is built on prod,
+/// which brings dhcp-client, as the Makefile decides.
+fn hasDhcp(io: Io, gpa: Allocator, form: []const u8, why: *Why) !bool {
+    var forms = Dir.cwd().openDir(io, "forms", .{}) catch
+        return why.refuse("no ./forms: run werewolf in a werewolf checkout", .{});
+    defer forms.close(io);
+    for (try chain(io, gpa, forms, form, why)) |name|
+        if (std.mem.eql(u8, name, "prod")) return true;
+    return false;
 }
 
 /// Whether Lima can manage a machine of form: one that answers Lima's ssh
@@ -1627,6 +1733,26 @@ test options {
         &.{ "a", "-x", "1" },
         &.{ "a", "--config", "x", "--config", "y" },
     }) |args| try testing.expectError(error.Refused, options(gpa, args, &why));
+}
+
+test "a static network, checked as init checks it" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var why: Why = .{};
+    const none: Interface = .{ .files = &.{}, .settings = &.{} };
+    const o = try options(gpa, &.{ "x", "--ip", "10.0.0.5/24", "--gw=10.0.0.1" }, &why);
+    const e = try gather(testing.io, gpa, none, o, &why);
+    try testing.expectEqualStrings("network", e[0].path);
+    try testing.expectEqualStrings("werewolf.ip=10.0.0.5/24 werewolf.gw=10.0.0.1\n", e[0].data);
+    for ([_][]const []const u8{
+        &.{ "x", "--gw", "10.0.0.1" },
+        &.{ "x", "--ip", "10.0.0.5" },
+        &.{ "x", "--ip", "10.0.0.5/24", "--dns", "224.0.0.1" },
+    }) |args| try testing.expectError(
+        error.Refused,
+        gather(testing.io, gpa, none, try options(gpa, args, &why), &why),
+    );
 }
 
 test "settings from flags, checked as the guest checks them" {
