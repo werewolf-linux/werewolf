@@ -41,6 +41,7 @@ limactl shell --workdir / "$vm" sh -euc "
 	command -v go >/dev/null || sudo apt-get install -y golang-go
 	command -v rustup >/dev/null || sudo apt-get install -y rustup
 	rustup toolchain install stable --profile minimal --target \"\$(uname -m)-unknown-linux-musl\"
+	dotnet --list-sdks 2>/dev/null | grep -q '^10\.' || sudo apt-get install -y dotnet-sdk-10.0
 	# A boot takes two CPUs (CHECK_QEMU's -smp 2): one per two, so no guest
 	# starves, which nested virtualization makes fatal (RCU stalls).
 	make -k -j\$(( (\$(nproc) + 1) / 2 )) check

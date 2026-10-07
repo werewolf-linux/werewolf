@@ -5,6 +5,8 @@ Run a small Python HTTP server as the unprivileged `app` user.
 Install the [build tools](../README.md#build-host), then run these commands
 from the repository root.
 
+`ARCH` defaults to your host architecture. Keep it the same for QEMU and GCP.
+
 ## Declare the app
 
 The [form](../../forms/example-python.yaml) inherits `python.yaml` and replaces
@@ -37,22 +39,20 @@ Complete the [GCP setup](../README.md#prepare-gcp-once) to set
 `GCP_PROJECT`, `GCP_BUCKET` and `GCP_SOURCE_RANGES`, then:
 
 ```sh
-make -C examples/python deploy-gcp ARCH=x86_64
+make -C examples/python deploy-gcp
 ```
 
-Open the printed URL; append `/health` for a health check.
-Use `ARCH=aarch64` instead for an Arm VM. To read the boot log:
+Open the printed URL, then visit `/health`. To read the boot log:
 
 ```sh
-make -C examples/python serial-gcp ARCH=x86_64
+make -C examples/python serial-gcp
 ```
 
 ## Automatic updates
 
-Werewolf checks for system updates after boot and every 20 hours. When updates
-are available, it builds a new system image, reboots and keeps the previous
-image for rollback.
-Application data survives updates and rollbacks.
+After boot checks pass, werewolf checks for system updates, then every 20 hours.
+It builds updates into a new image and reboots, keeping the previous image
+for rollback. Both images share `/data`; rolling back does not undo data changes.
 
 Python, Wolfi-packaged dependencies and the kernel update automatically.
 Your source code and vendored pip dependencies stay as built; changes to
@@ -62,7 +62,7 @@ For application changes, rebuild, test with a fresh QEMU disk, then deploy
 under a new name:
 
 ```sh
-make -C examples/python deploy-gcp ARCH=x86_64 GCP_NAME=werewolf-python-v2
+make -C examples/python deploy-gcp GCP_NAME=werewolf-python-v2
 ```
 
 Check the new VM before moving traffic. New VMs start with empty data;
@@ -75,9 +75,9 @@ These commands remove the example VMs, their disks and data, and deployment
 resources. The shared bucket stays.
 
 ```sh
-make -C examples/python delete-gcp ARCH=x86_64
+make -C examples/python delete-gcp
 # If you deployed v2:
-make -C examples/python delete-gcp ARCH=x86_64 GCP_NAME=werewolf-python-v2
+make -C examples/python delete-gcp GCP_NAME=werewolf-python-v2
 ```
 
 Use the same settings as deployment. [Cleanup details](../README.md#change-update-and-remove).

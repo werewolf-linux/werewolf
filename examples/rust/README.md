@@ -6,11 +6,14 @@ The VM needs no Rust compiler.
 Install the [build tools](../README.md#build-host), then run these commands
 from the repository root.
 
+`ARCH` defaults to your host architecture. Keep it the same for QEMU and GCP.
+
 ## Declare the app
 
 The [form](../../forms/example-rust.yaml) inherits `app.yaml`, which adds an
 application user to `prod`. It declares the service and port 8080.
-[main.rs](main.rs) builds a static Linux executable at `/usr/lib/app/server`.
+[main.rs](main.rs) is compiled into a static Linux executable installed at
+`/usr/lib/app/server`.
 This example uses no third-party crates; use an HTTP framework as your app grows.
 
 A form declares the machine's packages, users, services and network permissions.
@@ -42,32 +45,32 @@ Complete the [GCP setup](../README.md#prepare-gcp-once) to set
 `GCP_PROJECT`, `GCP_BUCKET` and `GCP_SOURCE_RANGES`, then:
 
 ```sh
-make -C examples/rust deploy-gcp ARCH=x86_64
+make -C examples/rust deploy-gcp
 ```
 
-Open the printed URL; append `/health` for a health check.
-Use `ARCH=aarch64` instead for an Arm VM. To read the boot log:
+Open the printed URL, then visit `/health`. To read the boot log:
 
 ```sh
-make -C examples/rust serial-gcp ARCH=x86_64
+make -C examples/rust serial-gcp
 ```
 
 ## Automatic updates
 
-Werewolf checks for system updates after boot and every 20 hours. When updates
-are available, it builds a new system image, reboots and keeps the previous
-image for rollback.
-Application data survives updates and rollbacks.
+After boot checks pass, werewolf checks for system updates, then every 20 hours.
+It builds updates into a new image and reboots, keeping the previous image
+for rollback. Both images share `/data`; rolling back does not undo data changes.
 
 Wolfi packages and the kernel update automatically. Rust's standard library,
 musl and any linked crates stay inside the compiled app; updating them or
 your code requires rebuilding the image with the updated toolchain and dependencies.
+After changing only the toolchain, use `make -B -C examples/rust image` to
+force a full rebuild.
 
 For application changes, rebuild, test with a fresh QEMU disk, then deploy
 under a new name:
 
 ```sh
-make -C examples/rust deploy-gcp ARCH=x86_64 GCP_NAME=werewolf-rust-v2
+make -C examples/rust deploy-gcp GCP_NAME=werewolf-rust-v2
 ```
 
 Check the new VM before moving traffic. New VMs start with empty data;
@@ -80,9 +83,9 @@ These commands remove the example VMs, their disks and data, and deployment
 resources. The shared bucket stays.
 
 ```sh
-make -C examples/rust delete-gcp ARCH=x86_64
+make -C examples/rust delete-gcp
 # If you deployed v2:
-make -C examples/rust delete-gcp ARCH=x86_64 GCP_NAME=werewolf-rust-v2
+make -C examples/rust delete-gcp GCP_NAME=werewolf-rust-v2
 ```
 
 Use the same settings as deployment. [Cleanup details](../README.md#change-update-and-remove).

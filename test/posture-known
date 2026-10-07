@@ -31,5 +31,6 @@ python programs-no-interpreters
 example-php programs-no-interpreters
 example-node programs-no-interpreters
 example-python programs-no-interpreters
+example-aspnet programs-no-interpreters
 webshell-example programs-no-interpreters programs-no-network-tools
 jre programs-no-interpreters

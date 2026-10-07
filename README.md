@@ -3,7 +3,7 @@
 <img src="docs/media/logo-small.png" alt="werewolf logo" width="160" align="right">
 
 werewolf is a Linux for virtual machines that gives malware nothing to run
-with. Production images have no shell and no interpreter. The root
+with. The production base has no shell and no interpreter. The root
 filesystem is read-only. The kernel is locked at boot, and not even root
 can unlock it.
 
@@ -13,8 +13,8 @@ build it.
 
 ## How it stays locked
 
-- **[No shell.](docs/design/shell-free.md)** Production forms carry no shell
-  or interpreter, and `posture` checks that they do not. A service is a
+- **[No shell.](docs/design/shell-free.md)** The production base carries no shell
+  or interpreter; application forms add runtimes explicitly. A service is a
   ten-line declaration, which `leash` starts as its own user under Landlock.
   A shell is a build option, never a dependency.
 - **Nothing written runs.** The root is a read-only erofs image. `/data`,
@@ -88,6 +88,11 @@ one includes `minimal`. `make list-forms` shows the include chains.
 CI publishes `minimal`, `prod` and `prod-ssh` as signed, reproducible releases. See
 [docs/releases.md](docs/releases.md).
 
+Build an application and run it on QEMU or GCP:
+[PHP](examples/php/README.md), [Python](examples/python/README.md),
+[Node.js](examples/nodejs/README.md), [Go](examples/go/README.md),
+[Rust](examples/rust/README.md) or [ASP.NET Core](examples/aspnet/README.md).
+
 ## Take over an existing VM
 
 When a provider will not boot a custom image, run `make bite-me` on a
@@ -97,7 +102,7 @@ after a healthy minute. See [docs/bite.md](docs/bite.md).
 
 ## Documentation
 
-- [examples/](examples/README.md): PHP, Python, Node.js, Go and Rust tutorials, with image builds and QEMU/GCP deployment
+- [examples/](examples/README.md): shared build tools and QEMU/GCP setup for the application tutorials
 - [docs/forms.md](docs/forms.md): the forms, and building your application into one
 - [docs/programs.md](docs/programs.md): the programs in `cmd/` and what confines them in `lib/`
 - [docs/data.md](docs/data.md): `/data`, disks and encryption

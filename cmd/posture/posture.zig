@@ -1120,6 +1120,7 @@ const Posture = struct {
                 "php",
                 "php-fpm",
                 "java",
+                "dotnet",
                 "tclsh",
                 "expect",
             },

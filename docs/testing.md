@@ -14,11 +14,11 @@ make check-gcp      # prod-ssh's disk on a Google Compute Engine VM
 (e2fsprogs). On a Mac: `brew install qemu e2fsprogs`; `expect` ships with
 macOS.
 
-The tutorial forms also need Go and rustup on the build host. Install Rust's
+The tutorial forms also need Go, rustup and the .NET 10 SDK on the build host. Install Rust's
 Linux musl target for the architecture being tested, for example
 `rustup toolchain install stable --profile minimal --target aarch64-unknown-linux-musl`.
 Use `x86_64-unknown-linux-musl` for `ARCH=x86_64`. CI and `make ci` install
-these compilers before checking the forms. Neither compiler ships in a VM.
+these compilers before checking the forms. None ships in a VM.
 
 ## What `make check` does
 

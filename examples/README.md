@@ -1,6 +1,6 @@
 # Applications on werewolf
 
-Five small HTTP services, each with a form, a Makefile and a tutorial:
+Six small HTTP services, each with a form, a Makefile and a tutorial:
 
 | Tutorial | Form | Builds on | Guest port |
 | --- | --- | --- | --- |
@@ -9,6 +9,7 @@ Five small HTTP services, each with a form, a Makefile and a tutorial:
 | [Node.js](nodejs/README.md) | `example-node` | `node` | 8080 |
 | [Go](go/README.md) | `example-go` | `app`, with a static binary | 8080 |
 | [Rust](rust/README.md) | `example-rust` | `app`, with a static musl binary | 8080 |
+| [ASP.NET Core](aspnet/README.md) | `example-aspnet` | `app`, with ASP.NET Core 10 | 8080 |
 
 Each serves a greeting at `/`, `ok` at `/health`, and 404 for an unknown
 path. These are small teaching applications, with no database or external
@@ -19,7 +20,7 @@ them for a public service.
 `prod` is application-neutral: it does not declare an `app` user or group.
 Its descendant [app](../forms/app.yaml) declares the unprivileged `app`
 user and group. Python, Node.js and JRE inherit it through their runtime
-forms; Go and Rust inherit it directly. PHP keeps distinct `php` and
+forms; Go, Rust and ASP.NET Core inherit it directly. PHP keeps distinct `php` and
 `nginx` service accounts for its two services in the same VM.
 
 ## Build host
@@ -53,6 +54,10 @@ Intel/AMD machine. Both can build either architecture. Go sets `GOOS=linux`
 and disables cgo; Rust uses its bundled linker and static musl target.
 Neither compiler goes into the image. `RUSTC` can override
 `rustup run stable rustc`; it must have the requested target installed.
+
+ASP.NET Core needs the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
+on the host. It publishes for Linux using the selected architecture; the VM
+contains the packaged runtime, not the SDK.
 
 ## What the Makefiles do
 
@@ -98,8 +103,8 @@ old disk for rollback or backup. Unlike the root Makefile's direct-boot
 `make run`, this disk boot can install and reboot into automatic updates.
 Network access is needed to build and, inside the VM, to update.
 
-The five Makefiles share [common.mk](common.mk) and [vm.mk](vm.mk), which
-invoke the existing image builder. [build.mk](build.mk) adds the two compiled
+The six Makefiles share [common.mk](common.mk) and [vm.mk](vm.mk), which
+invoke the existing image builder. [build.mk](build.mk) adds the three compiled
 applications to architecture-specific overlays and to the updater's list
 of files to carry forward. Ordinary `make FORM=example-go disk` works too.
 
@@ -178,7 +183,7 @@ These examples use plain HTTP; put a TLS endpoint in front of a real app.
 
 If HTTP fails, inspect the serial output first, then the source CIDR and
 VPC rules. `programs-no-interpreters` fails by design on PHP, Python and
-Node.js. It should pass on Go and Rust. A missing package/compiler/firmware
+Node.js and ASP.NET Core. It should pass on Go and Rust. A missing package/compiler/firmware
 is a build-host issue; an `app` retry or denied operation in the console
 points to the service declaration or application.
 
@@ -195,7 +200,7 @@ replacing a service that keeps state.
 For these custom forms, automatic updates refresh Wolfi packages and the
 Alpine kernel, build the inactive slot and reboot. They preserve the baked
 application and werewolf's own binaries; they do not fetch your Git tree,
-run package managers such as pip/npm/Composer, rebuild Go or Rust, or adopt
+run package managers such as pip/npm/Composer, rebuild application code, or adopt
 edits to a service or firewall declaration. See each language tutorial for
 what that means for its dependencies, and [updater.md](../docs/updater.md)
 for the update process. To refresh the build host's package locks:

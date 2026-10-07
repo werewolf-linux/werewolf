@@ -69,13 +69,14 @@ jobs:
       - name: Install tools
         run: sudo test/ci-setup
       - name: Install example compilers
-        # Only the forms group builds example-go and example-rust, which
+        # Only the forms group builds the compiled tutorial applications, which
         # compile on the host (examples/build.mk) for an image with no toolchain.
         if: matrix.group == 'forms'
         run: |
           command -v go || sudo apt-get install -y golang-go
           command -v rustup || sudo apt-get install -y rustup
           rustup toolchain install stable --profile minimal --target "$(uname -m)-unknown-linux-musl"
+          dotnet --list-sdks 2>/dev/null | grep -q '^10\.' || sudo apt-get install -y dotnet-sdk-10.0
       - name: Boot and check (${{ matrix.group }})
         # A boot takes two CPUs (CHECK_QEMU's -smp 2): one per two, so no
         # guest starves.

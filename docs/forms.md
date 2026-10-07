@@ -39,7 +39,7 @@ without it.
 `prod` has no `app` user or group. Its descendant `app` adds that account
 with uid/gid 204, home `/var/empty` and shell `/sbin/nologin`. It adds no
 packages, service or listening port. The `node`, `python` and `jre` forms,
-and the Go and Rust examples, inherit it. PHP and nginx keep distinct
+and the Go, Rust and ASP.NET Core examples, inherit it. PHP and nginx keep distinct
 service accounts because they run separate services in the same VM.
 
 `nginx`, `php`, `node`, `python` and `jre` are `prod` and one runtime from
@@ -72,8 +72,9 @@ none.
 For complete runnable tutorials with an image-building Makefile and
 `deploy-qemu` / `deploy-gcp` targets, see [the language examples](../examples/README.md):
 [PHP](../examples/php/README.md), [Python](../examples/python/README.md),
-[Node.js](../examples/nodejs/README.md), [Go](../examples/go/README.md) and
-[Rust](../examples/rust/README.md). Each explains declarative configuration
+[Node.js](../examples/nodejs/README.md), [Go](../examples/go/README.md),
+[Rust](../examples/rust/README.md) and [ASP.NET Core](../examples/aspnet/README.md).
+Each explains declarative configuration
 and what automatic updates do, including their limits for application code.
 
 An application is built into the image, as Chainguard's are with apko,
@@ -138,6 +139,7 @@ own service file, which leash reads to start it
 # forms/helloworld/etc/sv/app/service
 exec    /usr/bin/python3 -m gunicorn --bind 0.0.0.0:8080 --workers 2 --worker-tmp-dir /run/svc/app --no-control-socket --pythonpath /usr/lib/app --access-logfile - helloworld:app
 user    app
+pledge  stdio rpath wpath proc inet listen
 listen  tcp/8080
 env     PYTHONDONTWRITEBYTECODE=1
 env     PYTHONUNBUFFERED=1

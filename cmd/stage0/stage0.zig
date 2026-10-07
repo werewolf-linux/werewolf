@@ -184,10 +184,10 @@ fn deadman(slot: []const u8) void {
         var buf: [128]u8 = undefined;
         const msg = std.mem.print(
             &buf,
-            "stage0: slot {s} did not commit in 10 minutes; rebooting into the last good slot\n",
+            "<2>stage0: slot {s} did not commit in 10 minutes; rebooting into the last good slot\n",
             .{slot},
         ) catch "";
-        _ = writeFile("/dev/console", msg);
+        _ = writeFile("/dev/kmsg", msg); // reaches the console before the sysrq reboot; see fail()
         _ = writeFile("/deadman/sysrq-trigger", "b");
     }
     linux.exit(0);
@@ -451,10 +451,22 @@ fn say(comptime fmt: []const u8, args: anytype) void {
     _ = linux.write(1, line.ptr, line.len);
 }
 
-/// Exiting PID 1 panics the kernel; panic=10 reboots it, and the loader
-/// boots the slot that last committed.
+/// Exiting PID 1 panics the kernel; panic=1 reboots it, and the loader
+/// boots the slot that last committed. The reason goes through /dev/kmsg,
+/// which a serial console writes synchronously ("<2>", KERN_CRIT, so it
+/// prints whatever the console log level): a plain write to the console tty
+/// can still be draining the UART when the panic reboots the machine, and
+/// on a fast KVM host it is lost -- exactly when the reason matters most --
+/// whereas the kernel flushes its log on panic. The console itself is the
+/// fallback for a machine with no /dev/kmsg.
 fn fail(comptime fmt: []const u8, args: anytype) noreturn {
-    say(fmt ++ "; panicking, so the machine reboots into the last good slot", args);
+    var buf: [512]u8 = undefined;
+    const line = std.mem.print(
+        &buf,
+        "<2>stage0: " ++ fmt ++ "; panicking, so the machine reboots into the last good slot\n",
+        args,
+    ) catch linux.exit(1);
+    if (!writeFile("/dev/kmsg", line)) _ = linux.write(1, line.ptr + 3, line.len - 3);
     linux.exit(1);
 }
 

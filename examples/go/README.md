@@ -6,6 +6,8 @@ The VM needs no Go compiler.
 Install the [build tools](../README.md#build-host), then run these commands
 from the repository root.
 
+`ARCH` defaults to your host architecture. Keep it the same for QEMU and GCP.
+
 ## Declare the app
 
 The [form](../../forms/example-go.yaml) inherits `app.yaml`, which adds an
@@ -40,32 +42,32 @@ Complete the [GCP setup](../README.md#prepare-gcp-once) to set
 `GCP_PROJECT`, `GCP_BUCKET` and `GCP_SOURCE_RANGES`, then:
 
 ```sh
-make -C examples/go deploy-gcp ARCH=x86_64
+make -C examples/go deploy-gcp
 ```
 
-Open the printed URL; append `/health` for a health check.
-Use `ARCH=aarch64` instead for an Arm VM. To read the boot log:
+Open the printed URL, then visit `/health`. To read the boot log:
 
 ```sh
-make -C examples/go serial-gcp ARCH=x86_64
+make -C examples/go serial-gcp
 ```
 
 ## Automatic updates
 
-Werewolf checks for system updates after boot and every 20 hours. When updates
-are available, it builds a new system image, reboots and keeps the previous
-image for rollback.
-Application data survives updates and rollbacks.
+After boot checks pass, werewolf checks for system updates, then every 20 hours.
+It builds updates into a new image and reboots, keeping the previous image
+for rollback. Both images share `/data`; rolling back does not undo data changes.
 
 Wolfi packages and the kernel update automatically. The Go runtime, standard
 library and modules are compiled into the app; updating them or your code
 requires rebuilding the image with the updated toolchain and dependencies.
+After changing only the toolchain, use `make -B -C examples/go image` to
+force a full rebuild.
 
 For application changes, rebuild, test with a fresh QEMU disk, then deploy
 under a new name:
 
 ```sh
-make -C examples/go deploy-gcp ARCH=x86_64 GCP_NAME=werewolf-go-v2
+make -C examples/go deploy-gcp GCP_NAME=werewolf-go-v2
 ```
 
 Check the new VM before moving traffic. New VMs start with empty data;
@@ -78,9 +80,9 @@ These commands remove the example VMs, their disks and data, and deployment
 resources. The shared bucket stays.
 
 ```sh
-make -C examples/go delete-gcp ARCH=x86_64
+make -C examples/go delete-gcp
 # If you deployed v2:
-make -C examples/go delete-gcp ARCH=x86_64 GCP_NAME=werewolf-go-v2
+make -C examples/go delete-gcp GCP_NAME=werewolf-go-v2
 ```
 
 Use the same settings as deployment. [Cleanup details](../README.md#change-update-and-remove).
