@@ -43,6 +43,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const seal_lib = @import("seal");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -95,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
     )) != .SUCCESS) say("core dumps not limited", .{});
     // The seal fails closed, as fence does: PID 1 ends, the kernel panics,
     // and the machine comes back on the slot that last worked.
-    seal() catch |err| {
+    seal(&m) catch |err| {
         say("not sealed: {s}; not handing over", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -965,41 +966,28 @@ const sysctls = [_][2][]const u8{
 
 // --- the seal --------------------------------------------------------------------
 
-/// System calls no program here makes once init hands over, refused for
-/// every process the machine will run (docs/design/lockdown.md, the seal), each
-/// where the architecture has it:
-///
-///   bpf, perf_event_open           eBPF and kernel tracing, which rootkits
-///                                  are made of
-///   init_module .. delete_module   modules: the loader closed already
-///   kexec_load, kexec_file_load    another kernel: lockdown refuses already
-///   io_uring_*                     makes kernel.io_uring_disabled permanent
-///   userfaultfd                    the usual way to win a kernel race
-///   open_by_handle_at, name_..     walking past mounts by inode handle
-///   add_key, keyctl, request_key   the kernel keyring; cryptsetup is done
-///                                  with it before init hands over
-///   process_vm_readv, _writev      another process's memory: Yama refuses
-///   modify_ldt, iopl, ioperm       16-bit code and I/O ports
-///   acct .. vhangup                unused here; old, rarely audited code
-///
-/// syslog stays: busybox's dmesg reads the kernel's log with it.
-const denied_names = [_][]const u8{
-    "bpf",               "perf_event_open",   "init_module",     "finit_module",
-    "delete_module",     "kexec_load",        "kexec_file_load", "io_uring_setup",
-    "io_uring_enter",    "io_uring_register", "userfaultfd",     "open_by_handle_at",
-    "name_to_handle_at", "add_key",           "keyctl",          "request_key",
-    "process_vm_readv",  "process_vm_writev", "modify_ldt",      "iopl",
-    "ioperm",            "acct",              "swapon",          "swapoff",
-    "quotactl",          "lookup_dcookie",    "uselib",          "vhangup",
-};
+/// The seal (docs/design/lockdown.md) denies by default, in promises
+/// (docs/design/pledge.md, System calls: promises): every process the
+/// machine will run may make the calls of the promises werewolf's own
+/// programs make (seal_lib.base) and of every promise the image's services
+/// make, which the build gathers from their service files' `pledge` lines
+/// into /usr/share/werewolf/pledge. leash then holds each service to its
+/// own. The rest go to seal-watch (cmd/seal-watch), which refuses them as
+/// if the kernel had no such call and says so once each, with the promise
+/// that would allow it; or, on a DEV=1 build booted with
+/// werewolf.seal=learn, allows and records them. What no promise brings
+/// goes to seal-watch too, so an attempt is seen.
+const never = seal_lib.never;
 
-const denied: []const linux.SYS = blk: {
-    var list: []const linux.SYS = &.{};
-    for (denied_names) |name| {
-        if (@hasField(linux.SYS, name)) list = list ++ [_]linux.SYS{@field(linux.SYS, name)};
-    }
-    break :blk list;
-};
+/// What policy_path says: the mode, and the promises the seal allows.
+fn policyText(gpa: Allocator, learn: bool, promises: seal_lib.Set) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.print(gpa, "mode {s}\npromises", .{if (learn) "learn" else "enforce"});
+    var it = promises.iterator();
+    while (it.next()) |p| try out.print(gpa, " {s}", .{@tagName(p)});
+    try out.append(gpa, '\n');
+    return out.items;
+}
 
 /// Capabilities no process needs once init hands over, dropped from the
 /// bounding set, so not even root gets them back before a reboot: code in
@@ -1025,65 +1013,6 @@ const dropped_caps = [_]struct { name: []const u8, n: u6 }{
     .{ .name = "checkpoint_restore", .n = 40 },
 };
 
-/// The architecture every system call must come in as. Any other, which on
-/// aarch64 is a 32-bit (AArch32) program's, kills the process: werewolf ships
-/// no 32-bit code, and the kernel has no switch to turn those calls off.
-const native_arch: u32 = switch (builtin.cpu.arch) {
-    .aarch64 => 0xc00000b7, // AUDIT_ARCH_AARCH64
-    .x86_64 => 0xc000003e, // AUDIT_ARCH_X86_64
-    else => unreachable,
-};
-
-const Filter = extern struct { code: u16, jt: u8, jf: u8, k: u32 };
-const LD_W_ABS = 0x20;
-const JEQ_K = 0x15;
-const JGE_K = 0x35;
-const RET_K = 0x06;
-const SECCOMP_RET_KILL_PROCESS: u32 = 0x80000000;
-const SECCOMP_RET_ERRNO: u32 = 0x00050000;
-const SECCOMP_RET_ALLOW: u32 = 0x7fff0000;
-
-/// Load the architecture; kill another; load the number; each denied number
-/// jumps to the ENOSYS at the end, as if the kernel had no such call; the
-/// rest are allowed. It reads numbers, never arguments, so the kernel
-/// caches every allowed call as allowed and runs no filter for it, and a
-/// longer table costs nothing more. What any filter costs is the kernel's
-/// slower way into every system call, about 25 ns a call (docs/design/lockdown.md,
-/// *What the seal costs*): werewolf pays that, by choice.
-///
-/// On x86_64 a number with bit 30 set is an x32 call, under x86_64's own
-/// architecture: it would pass every comparison below as another number,
-/// so it kills the process too. Alpine's kernel has no x32 ABI; the check
-/// keeps one that does from opening the table.
-const seal_filter = blk: {
-    const n = denied.len;
-    const x32 = builtin.cpu.arch == .x86_64;
-    const at = if (x32) 6 else 4; // the first comparison
-    var f: [at + 2 + n]Filter = undefined;
-    f[0] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 4 }; // seccomp_data.arch
-    f[1] = .{ .code = JEQ_K, .jt = 1, .jf = 0, .k = native_arch };
-    f[2] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
-    f[3] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 0 }; // seccomp_data.nr
-    if (x32) {
-        f[4] = .{ .code = JGE_K, .jt = 0, .jf = 1, .k = 0x40000000 }; // __X32_SYSCALL_BIT
-        f[5] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
-    }
-    for (denied, 0..) |sys, i| f[at + i] = .{
-        .code = JEQ_K,
-        .jt = @intCast(n - i),
-        .jf = 0,
-        .k = @intCast(@backingInt(sys)),
-    };
-    f[at + n] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_ALLOW };
-    f[at + 1 + n] = .{
-        .code = RET_K,
-        .jt = 0,
-        .jf = 0,
-        .k = SECCOMP_RET_ERRNO | @backingInt(linux.E.NOSYS),
-    };
-    break :blk f;
-};
-
 /// The capabilities a program the kernel starts itself may have: a
 /// usermode helper, which kthreadd starts, not PID 1, so neither the seal's
 /// filter nor its bounding set reach it. Root could name one (a core
@@ -1102,13 +1031,53 @@ fn capWords(buf: []u8, set: u64) []const u8 {
     ) catch unreachable;
 }
 
+/// seal-watch, started before the seal so it is not under it, with one end
+/// of a socket as its stdin, over which it is sent the seal's listener; the
+/// other end, or null if it cannot be started. Raw calls only between fork
+/// and exec: this process may have threads.
+fn startWatch() ?i32 {
+    const path = "/usr/lib/werewolf/seal-watch";
+    if (!executable(path)) return null;
+    var sv: [2]i32 = undefined;
+    if (linux.errno(linux.socketpair(
+        linux.AF.UNIX,
+        linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC,
+        0,
+        &sv,
+    )) != .SUCCESS) return null;
+    const argv: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{path};
+    const envp: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{};
+    const pid = linux.fork();
+    if (linux.errno(pid) != .SUCCESS) return null;
+    if (pid == 0) {
+        _ = linux.dup2(sv[1], 0);
+        _ = linux.execve(path, argv, envp);
+        linux.exit_group(127);
+    }
+    _ = linux.close(sv[1]);
+    return sv[0];
+}
+
 /// Install the seal on PID 1, which every process inherits and none, root
 /// included, can remove until the machine reboots: the helpers' bounding
 /// set, PID 1's, then the filter. PID 1 holds CAP_SYS_ADMIN, so it needs no
 /// no_new_privs, which would bind every program after it. Any step that
 /// fails is an error; a capability the kernel does not know (EINVAL) is
 /// one it cannot grant.
-fn seal() !void {
+fn seal(m: *Machine) !void {
+    // Learning: what the promises do not allow, seal-watch allows and
+    // records, with the promise that would, so a service's author learns
+    // what its pledge lacks. Only on a DEV=1 build, never released;
+    // anywhere else the word is ignored.
+    const learn = std.mem.eql(u8, m.cmd.seal, "learn") and exists("/usr/share/werewolf/dev");
+    if (m.cmd.seal.len > 0 and
+        !learn) say("werewolf.seal={s} ignored: only a DEV=1 build learns", .{m.cmd.seal});
+    var bad: []const u8 = "";
+    const pledged = seal_lib.parse(m.read("/usr/share/werewolf/pledge"), &bad) catch |err| {
+        say("/usr/share/werewolf/pledge: {s}: {s}", .{ bad, @errorName(err) });
+        return err;
+    };
+    const promises = seal_lib.base.unionWith(pledged);
     var buf: [32]u8 = undefined;
     for ([_][:0]const u8{
         "/proc/sys/kernel/usermodehelper/bset",
@@ -1116,6 +1085,9 @@ fn seal() !void {
     }, [_]u64{ helper_caps, 0 }) |path, set| {
         if (!writeFile(path, capWords(&buf, set))) return error.UsermodeHelperCaps;
     }
+    mkdir("/run/werewolf/seal", 0o755);
+    const watch = startWatch();
+    if (watch == null) say("no seal-watch: unlisted calls are refused unsaid", .{});
     const PR_CAPBSET_DROP = 24;
     var caps: usize = 0;
     for (dropped_caps) |c| {
@@ -1129,20 +1101,25 @@ fn seal() !void {
             },
         }
     }
-    const SECCOMP_SET_MODE_FILTER = 1;
-    const prog = extern struct {
-        len: u16,
-        filter: [*]const Filter,
-    }{ .len = seal_filter.len, .filter = &seal_filter };
-    const rc = linux.seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog);
-    if (linux.errno(rc) != .SUCCESS) {
-        say("seccomp: {t}", .{linux.errno(rc)});
-        return error.Seccomp;
+    var filter_buf: [seal_lib.max_filter]seal_lib.Filter = undefined;
+    const filter = seal_lib.buildFilter(&filter_buf, promises, false);
+    const listener = seal_lib.install(filter, true) catch |err| {
+        say("seccomp: {s}", .{@errorName(err)});
+        return err;
+    };
+    // The listener goes to seal-watch alone. Once no one holds it, the
+    // kernel refuses every call the promises do not allow, itself.
+    if (watch) |sock| {
+        if (!seal_lib.sendListener(sock, listener, if (learn) "l" else "e"))
+            say("seal-watch did not take the listener: unlisted calls are refused unsaid", .{});
+        _ = linux.close(sock);
     }
+    _ = linux.close(listener);
+    m.write(seal_lib.policy_path, policyText(m.gpa, learn, promises) catch "", 0o644);
     say(
-        "sealed: {d} system calls refused, {d} capabilities dropped, other architectures' calls " ++
-            "fatal",
-        .{ denied.len, caps },
+        "sealed: {d} promises; every other call {s}; {d} capabilities dropped; " ++
+            "other architectures' calls fatal",
+        .{ promises.count(), if (learn) "allowed and recorded" else "refused", caps },
     );
 }
 
@@ -1156,6 +1133,7 @@ const Cmdline = struct {
     data: []const u8 = "",
     victim: []const u8 = "",
     grubenv: []const u8 = "",
+    seal: []const u8 = "",
 };
 
 fn parseCmdline(text: []const u8) Cmdline {
@@ -1432,48 +1410,11 @@ fn say(comptime f: []const u8, args: anytype) void {
 
 const testing = std.testing;
 
-/// What seal_filter returns for a call: the filter run as the kernel runs
-/// it, for the few instructions it uses.
-fn sealAction(arch: u32, nr: u32) u32 {
-    var a: u32 = 0;
-    var pc: usize = 0;
-    while (true) {
-        const i = seal_filter[pc];
-        switch (i.code) {
-            LD_W_ABS => a = if (i.k == 4) arch else nr,
-            JEQ_K => pc += if (a == i.k) i.jt else i.jf,
-            JGE_K => pc += if (a >= i.k) i.jt else i.jf,
-            RET_K => return i.k,
-            else => unreachable,
-        }
-        pc += 1;
-    }
-}
-
-test seal_filter {
-    const enosys = SECCOMP_RET_ERRNO | @backingInt(linux.E.NOSYS);
-    for (denied) |sys| try testing.expectEqual(
-        enosys,
-        sealAction(native_arch, @intCast(@backingInt(sys))),
-    );
-    for ([_]linux.SYS{
-        .read,
-        .write,
-        .openat,
-        .mmap,
-        .futex,
-        .getpid,
-    }) |sys| try testing.expectEqual(
-        SECCOMP_RET_ALLOW,
-        sealAction(native_arch, @intCast(@backingInt(sys))),
-    );
-    try testing.expectEqual(SECCOMP_RET_KILL_PROCESS, sealAction(0x40000028, 0)); // AUDIT_ARCH_ARM
-    try testing.expectEqual(SECCOMP_RET_KILL_PROCESS, sealAction(0x40000003, 0)); // AUDIT_ARCH_I386
-    // x32: a denied number, or any, with bit 30 set.
-    if (builtin.cpu.arch == .x86_64) for ([_]u32{ 0x40000000, 0x40000000 | 154, 0xffffffff }) |nr| {
-        try testing.expectEqual(SECCOMP_RET_KILL_PROCESS, sealAction(native_arch, nr));
-    };
-    try testing.expectEqual(SECCOMP_RET_ALLOW, sealAction(native_arch, 0x3fffffff));
+test policyText {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const text = try policyText(arena.allocator(), false, .initMany(&.{ .stdio, .inet }));
+    try testing.expectEqualStrings("mode enforce\npromises stdio inet\n", text);
 }
 
 test capWords {

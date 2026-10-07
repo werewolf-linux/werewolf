@@ -1634,7 +1634,8 @@ const Posture = struct {
         }
         const file = try p.gpa.print(
             "# posture's probe (werewolf.check=1), granted TCP port 1 and nothing else\n" ++
-                "exec {s} --probe\nuser nobody\nconnect tcp/1\n",
+                "exec {s} --probe\nuser nobody\nconnect tcp/1\npledge stdio rpath wpath inet " ++
+                "connect proc exec\n",
             .{self},
         );
         Dir.cwd().writeFile(
@@ -1645,18 +1646,25 @@ const Posture = struct {
             .argv = &.{leash_bin},
             .cwd = .{ .path = probe_dir },
             .stdin = .ignore,
-            .stdout = .ignore,
-            .stderr = .ignore,
         }) catch return;
         const term = child.wait(p.io) catch return;
-        const code: u8 = if (term == .exited) @truncate(term.exited) else 0;
+        const ran = term == .exited and term.exited == 0x80;
+        // The probe writes a bitmask of what went wrong to its own
+        // directory, where only it may write; posture, as root, reads it.
+        var mask: u32 = 0;
+        if (Dir.cwd().readFileAlloc(
+            p.io,
+            "/run/svc/" ++ probe_name ++ "/result",
+            p.gpa,
+            .limited(16),
+        )) |m| {
+            if (m.len >= 4) mask = std.mem.readInt(u32, m[0..4], .little);
+        } else |_| {}
         var got: std.ArrayList(u8) = .empty;
-        if (code & 0x80 != 0) {
-            for (probe_tries, 0..) |what, i| {
-                if (code & (@as(u8, 1) << @intCast(i)) != 0)
-                    try got.print(p.gpa, "{s}{s}", .{ if (got.items.len > 0) ", " else "", what });
-            }
-        }
+        if (ran) for (probe_tries, 0..) |what, i| {
+            if (mask & (@as(u32, 1) << @intCast(i)) != 0)
+                try got.print(p.gpa, "{s}{s}", .{ if (got.items.len > 0) ", " else "", what });
+        };
         try p.add(.{
             .id = "processes-leash-attack",
             .area = "processes",
@@ -1664,12 +1672,13 @@ const Posture = struct {
             .why = "A service that is taken over can reach only the files, programs and ports " ++
                 "its " ++
                 "service file names.",
-            .how = "this program, leashed as nobody and granted TCP port 1, cannot read " ++
-                "/run/werewolf/hostname, write /tmp, run /usr/bin/sv or connect to port 2 on " ++
-                "127.0.0.1, and can read /etc/passwd, write its own directory and connect to " ++
-                "port 1",
-            .result = if (code & 0x80 == 0) .fail else if (got.items.len == 0) .pass else .fail,
-            .detail = if (code & 0x80 == 0) "the probe did not run" else got.items,
+            .how = "this program, leashed as nobody, granted TCP port 1 and pledged " ++
+                "stdio rpath wpath inet connect proc exec, cannot read /run/werewolf/hostname, " ++
+                "write /tmp, run /usr/bin/sv, connect to port 2, or (its pledge not promising " ++
+                "them) make a memfd, an inotify watch or SysV shared memory; and can read " ++
+                "/etc/passwd, write its own directory and connect to port 1",
+            .result = if (!ran) .fail else if (got.items.len == 0) .pass else .fail,
+            .detail = if (!ran) "the probe did not run" else got.items,
         });
     }
 
@@ -3045,12 +3054,18 @@ const probe_tries = [_][]const u8{
     "could not write its own directory",
     "wrote to /tmp",
     "ran a program it was not granted",
+    "made a memfd, which its pledge did not promise",
+    "made an inotify watch, which its pledge did not promise",
+    "made SysV shared memory, which its pledge did not promise",
 };
 
-/// posture --probe, as leashed by leashAttack: 128, and a bit for each of
-/// probe_tries that went wrong. It makes only system calls.
+/// posture --probe, as leashed by leashAttack: a bit for each of
+/// probe_tries that went wrong, written to its own directory, which
+/// leashAttack reads; it exits 0x80 to say it ran. It makes only system
+/// calls. Bits 0..6 are the leash's Landlock (files, ports, programs);
+/// 7..9 the pledge's seccomp (calls it did not promise must be ENOSYS).
 fn probe() u8 {
-    var bits: u8 = 0;
+    var bits: u32 = 0;
     if (opens("/run/werewolf/hostname")) bits |= 1 << 0;
     if (!opens("/etc/passwd")) bits |= 1 << 1;
     if (connectError(2) != .ACCES) bits |= 1 << 2;
@@ -3058,7 +3073,42 @@ fn probe() u8 {
     if (!creates("/run/svc/" ++ probe_name ++ "/x")) bits |= 1 << 4;
     if (creates("/tmp/." ++ probe_name)) bits |= 1 << 5;
     if (runs("/usr/bin/sv")) bits |= 1 << 6;
-    return 0x80 | bits;
+    // Its pledge promised none of memfd, watch or ipc, so each of these,
+    // which the per-service seccomp filter should refuse (ENOSYS), must not
+    // succeed; a success is a hole in the pledge.
+    if (made(.memfd_create)) bits |= 1 << 7;
+    if (made(.inotify_init1)) bits |= 1 << 8;
+    if (made(.shmget)) bits |= 1 << 9;
+    var buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &buf, bits, .little);
+    const fd = linux.open(
+        "/run/svc/" ++ probe_name ++ "/result",
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true },
+        0o600,
+    );
+    if (linux.errno(fd) == .SUCCESS) {
+        _ = linux.write(@intCast(fd), &buf, buf.len);
+        _ = linux.close(@intCast(fd));
+    }
+    return 0x80;
+}
+
+/// Whether a call the probe's pledge did not promise still worked: the
+/// per-service seccomp filter should answer ENOSYS, so a success is a hole.
+/// Each returns a descriptor or id when allowed, closed or removed at once.
+fn made(comptime sys: std.os.linux.SYS) bool {
+    const rc = switch (sys) {
+        .memfd_create => linux.syscall2(sys, @intFromPtr("probe"), 0),
+        .inotify_init1 => linux.syscall1(sys, @as(usize, linux.IN.CLOEXEC)),
+        .shmget => linux.syscall3(sys, 0, 4096, 0o600), // IPC_PRIVATE
+        else => unreachable,
+    };
+    if (linux.errno(rc) != .SUCCESS) return false;
+    switch (sys) {
+        .shmget => _ = linux.syscall3(.shmctl, rc, 0, 0), // IPC_RMID
+        else => _ = linux.close(@intCast(rc)),
+    }
+    return true;
 }
 
 fn opens(path: [:0]const u8) bool {

@@ -27,11 +27,22 @@
 //!     connect tcp/PORT...     ports it may reach; without it, none
 //!     read PATH...            read beyond the floor (below)
 //!     write PATH...           read and write beyond its own directories
-//!     run PROGRAM...          other programs it may start
+//!     run PROGRAM...          other programs it may start. Landlock grants
+//!                             exec per file, so a multi-call binary (busybox,
+//!                             Wolfi's coreutils, whose applets are symlinks
+//!                             to one file) is all-or-nothing: naming one
+//!                             applet allows them all. What bounds them then
+//!                             is the floor, the capabilities and the network,
+//!                             not the names.
 //!     requires PATH...        stay down unless each exists
+//!     pledge PROMISE...       the system calls it may make, in promises
+//!                             (lib/seal.zig); required, once
 //!     env NAME=VALUE          its environment, otherwise only PATH
 //!     secret NAME PATH        a variable read from a file; never logged
 //!     nofile N                its limit on open files
+//!     memory N                the most address space it may map, in MiB,
+//!                             a ceiling so one service cannot exhaust the
+//!                             machine's memory (RLIMIT_AS)
 //!
 //! Every service also gets /run/svc/NAME and, while /data is usable,
 //! /data/svc/NAME, owned by its user and its working directory; and the
@@ -49,17 +60,27 @@
 //! capability but the one a low port needs, no_new_privs, and a check that
 //! root cannot be had back. Then the ruleset applies, with Landlock's
 //! scoping (no signals or abstract UNIX sockets outside the service), and
-//! leash runs each `before` and becomes the service. Nothing of leash runs
-//! after that, so the service pays nothing for it.
+//! leash runs each `before`; then a seccomp filter of the service's
+//! promises, stacked on the seal, whose refusals seal-watch answers and
+//! says, and leash becomes the service. Nothing of leash runs after that,
+//! so the service pays nothing for it.
+//!
+//! A promise is a class of work (docs/design/pledge.md, System calls:
+//! promises): `stdio rpath inet listen` for a server that reads files and
+//! takes connections. leash becomes the service by executing an open
+//! descriptor of its program, which a pledge without exec still allows,
+//! and Landlock lets it execute nothing but that program; `pledge exec`
+//! lets it run the programs its `run` lines name too.
 //!
 //! What cannot change by waiting, a bad line, a missing requirement or a
 //! `before` that fails, parks the service: one line on the console says
 //! why, and runsv is told to keep it down. A path another service has not
 //! made yet is not that: leash exits, and runsv tries again in a second.
-//! The system calls a service may make are the seal's business, for every
-//! process at once (docs/design/lockdown.md), not leash's.
+//! The `before` programs run before the pledge, under the seal and the
+//! rest of the leash.
 
 const std = @import("std");
+const seal = @import("seal");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -78,6 +99,15 @@ pub fn main(init: std.process.Init) !void {
 
     // Whatever runsv left open goes at exec; leash's own files close too.
     _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = true });
+    // runsv hands fd 0 the console, write-only: a service that kept it could
+    // forge log lines there (WEBSHELL_VULNS #1). It reads nothing from a
+    // person, so fd 0 becomes /dev/null; it logs on fd 1 and 2, which runsv
+    // routes.
+    const null_fd = linux.open("/dev/null", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    if (linux.errno(null_fd) == .SUCCESS) {
+        _ = linux.dup2(@intCast(null_fd), 0);
+        _ = linux.close(@intCast(null_fd));
+    }
     // runsv's control pipe, opened while root, so a service can be parked
     // from any step, before or after root is given up.
     const ctl_rc = linux.open(
@@ -155,6 +185,13 @@ pub fn main(init: std.process.Init) !void {
             &.{ .cur = n, .max = n },
         )) != .SUCCESS) fail(io, ctl, .park, name, "nofile {d}: refused", .{n});
     }
+    if (s.memory) |mib| {
+        const bytes: u64 = @as(u64, mib) << 20;
+        if (linux.errno(linux.setrlimit(
+            .AS,
+            &.{ .cur = bytes, .max = bytes },
+        )) != .SUCCESS) fail(io, ctl, .park, name, "memory {d}: refused", .{mib});
+    }
 
     var rules = Ruleset.init() catch |err| fail(
         io,
@@ -224,6 +261,7 @@ pub fn main(init: std.process.Init) !void {
             .listen = s.listen,
             .connect = s.connect,
             .landlock = rules.abi,
+            .pledge = try promiseWords(gpa, s.pledge),
         },
     );
 
@@ -244,8 +282,77 @@ pub fn main(init: std.process.Init) !void {
         if (term != .exited or
             term.exited != 0) fail(io, ctl, .park, name, "before {s} failed", .{argv[0]});
     }
-    const err = std.process.replace(io, .{ .argv = s.exec, .environ_map = &env });
-    fail(io, ctl, .park, name, "exec {s}: {s}", .{ s.exec[0], @errorName(err) });
+    // The program, open before the pledge: becoming it is executing this
+    // descriptor. A pledge without exec still allows that one execveat, and
+    // Landlock lets it run only this program.
+    const prog_rc = linux.open(
+        try gpa.dupeSentinel(u8, s.exec[0], 0),
+        .{ .ACCMODE = .RDONLY, .PATH = true, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(prog_rc) != .SUCCESS)
+        fail(
+            io,
+            ctl,
+            .retry,
+            name,
+            "exec {s}: {s}",
+            .{ s.exec[0], @tagName(linux.errno(prog_rc)) },
+        );
+    const argv = try gpa.allocSentinel(?[*:0]const u8, s.exec.len, null);
+    for (s.exec, argv) |a, *p| p.* = try gpa.dupeSentinel(u8, a, 0);
+    const envp = try gpa.allocSentinel(?[*:0]const u8, env.count(), null);
+    var env_it = env.iterator();
+    var i: usize = 0;
+    while (env_it.next()) |e| : (i += 1)
+        envp[i] = try gpa.printSentinel("{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }, 0);
+
+    // The service's own filter, refusing with ENOSYS what its pledge does
+    // not promise: no listener, so no_new_privs (set in dropTo) is enough.
+    // A machine learning (werewolf.seal=learn, a DEV=1 build) installs none,
+    // so every call reaches the machine seal, which records it.
+    if (!learning()) {
+        var filter_buf: [seal.max_filter]seal.Filter = undefined;
+        const filter = seal.buildFilter(&filter_buf, s.pledge, true);
+        _ = seal.install(filter, false) catch |e|
+            fail(io, ctl, .park, name, "pledge: {s}", .{@errorName(e)});
+    }
+    const rc = linux.syscall5(
+        .execveat,
+        prog_rc,
+        @intFromPtr(""),
+        @intFromPtr(argv.ptr),
+        @intFromPtr(envp.ptr),
+        0x1000, // AT_EMPTY_PATH
+    );
+    fail(io, ctl, .park, name, "exec {s}: {s}", .{ s.exec[0], @tagName(linux.errno(rc)) });
+}
+
+/// Whether the machine is learning its pledges (werewolf.seal=learn, a
+/// DEV=1 build), when a service installs no filter of its own, so every
+/// call reaches the machine seal to be recorded.
+fn learning() bool {
+    var buf: [4096]u8 = undefined;
+    const fd = linux.open("/proc/cmdline", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    if (linux.errno(fd) != .SUCCESS) return false;
+    defer _ = linux.close(@intCast(fd));
+    const n = linux.read(@intCast(fd), &buf, buf.len);
+    if (linux.errno(n) != .SUCCESS) return false;
+    var it = std.mem.tokenizeAny(u8, buf[0..n], " \n");
+    while (it.next()) |a| if (std.mem.eql(
+        u8,
+        a,
+        "werewolf.seal=learn",
+    )) return exists("/usr/share/werewolf/dev");
+    return false;
+}
+
+/// A pledge, as the words a service file says it in.
+fn promiseWords(gpa: Allocator, set: seal.Set) ![]const []const u8 {
+    var words: std.ArrayList([]const u8) = .empty;
+    var it = set.iterator();
+    while (it.next()) |p| try words.append(gpa, @tagName(p));
+    return words.items;
 }
 
 // --- the service file ----------------------------------------------------------
@@ -263,6 +370,8 @@ const Service = struct {
     env: []const [2][]const u8 = &.{},
     secrets: []const [2][]const u8 = &.{},
     nofile: ?u32 = null,
+    memory: ?u32 = null,
+    pledge: seal.Set = .empty,
 };
 
 /// Where the file is wrong, and how.
@@ -274,6 +383,8 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var exec: ?[]const []const u8 = null;
     var user: ?[]const u8 = null;
     var nofile: ?u32 = null;
+    var memory: ?u32 = null;
+    var pledge: ?seal.Set = null;
     var before: std.ArrayList([]const []const u8) = .empty;
     var listen: std.ArrayList(u16) = .empty;
     var connect: std.ArrayList(u16) = .empty;
@@ -346,6 +457,17 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
                 "a path must be absolute, without . or .. or //",
             );
             try secrets.append(gpa, .{ args[0], args[1] });
+        } else if (std.mem.eql(u8, key, "pledge")) {
+            if (pledge != null) return invalid(bad, "pledge twice");
+            if (args.len == 0) return invalid(bad, "pledge takes promises");
+            var set: seal.Set = .empty;
+            for (args) |a| set.insert(
+                std.meta.stringToEnum(
+                    seal.Promise,
+                    a,
+                ) orelse return invalid(bad, "no such promise"),
+            );
+            pledge = set;
         } else if (std.mem.eql(u8, key, "nofile")) {
             if (nofile != null) return invalid(bad, "nofile twice");
             if (args.len != 1) return invalid(bad, "nofile takes one number");
@@ -355,12 +477,24 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
                 10,
             ) catch return invalid(bad, "nofile takes a number");
             if (nofile.? == 0 or nofile.? > 1 << 20) return invalid(bad, "nofile is 1 to 1048576");
+        } else if (std.mem.eql(u8, key, "memory")) {
+            if (memory != null) return invalid(bad, "memory twice");
+            if (args.len != 1) return invalid(bad, "memory takes one number of MiB");
+            memory = std.fmt.parseInt(
+                u32,
+                args[0],
+                10,
+            ) catch return invalid(bad, "memory takes a number of MiB");
+            if (memory.? == 0 or
+                memory.? > 1 << 20) return invalid(bad, "memory is 1 to 1048576 MiB");
         } else return invalid(bad, "unknown key");
     }
     bad.line = 0;
+    const promises = pledge orelse return invalid(bad, "no pledge: say what it does");
     return .{
         .exec = exec orelse return invalid(bad, "no exec"),
         .user = user orelse return invalid(bad, "no user"),
+        .pledge = promises,
         .before = before.items,
         .listen = listen.items,
         .connect = connect.items,
@@ -371,6 +505,7 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
         .env = env.items,
         .secrets = secrets.items,
         .nofile = nofile,
+        .memory = memory,
     };
 }
 
@@ -875,6 +1010,8 @@ test parse {
         \\env     "GREETING=hello world"
         \\secret  TOKEN /run/config/x/token
         \\nofile  65536
+        \\memory  512
+        \\pledge  stdio rpath inet listen connect exec
     , &bad);
     try testing.expectEqualStrings("/etc/nginx/nginx.conf", s.exec[2]);
     try testing.expectEqual(3, s.before[0].len);
@@ -887,6 +1024,8 @@ test parse {
     try testing.expectEqualStrings("hello world", s.env[0][1]);
     try testing.expectEqualStrings("TOKEN", s.secrets[0][0]);
     try testing.expectEqual(65536, s.nofile.?);
+    try testing.expectEqual(512, s.memory.?);
+    try testing.expect(s.pledge.contains(.listen) and !s.pledge.contains(.proc));
 }
 
 test "parse refuses" {
@@ -905,9 +1044,15 @@ test "parse refuses" {
         .{ .text = "exec /a \"b\nuser x", .line = 1 },
         .{ .text = "exec /a b\"c\"\nuser x", .line = 1 },
         .{ .text = "exec /a\nuser x\nnofile 0", .line = 3 },
+        .{ .text = "exec /a\nuser x\nmemory 0", .line = 3 },
+        .{ .text = "exec /a\nuser x\nmemory huge", .line = 3 },
         .{ .text = "user x", .line = 0 },
         .{ .text = "exec /a", .line = 0 },
         .{ .text = "exec /a\x07\nuser x", .line = 1 },
+        .{ .text = "exec /a\nuser x", .line = 0 }, // no pledge
+        .{ .text = "exec /a\nuser x\npledge stdio ptrace", .line = 3 },
+        .{ .text = "exec /a\nuser x\npledge", .line = 3 },
+        .{ .text = "exec /a\nuser x\npledge stdio\npledge rpath", .line = 4 },
     };
     for (cases) |c| {
         var bad: Bad = .{};

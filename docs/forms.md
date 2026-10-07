@@ -166,11 +166,20 @@ and nothing else. The kernel enforces each limit; nothing asks the program:
 
 | It tries | Without a line for it | The line |
 | --- | --- | --- |
+| to make a system call | refused as if the kernel had no such call (seccomp) | `pledge PROMISE...`: what classes of call it may make (`stdio rpath inet listen`), the OpenBSD-pledge words werewolf maps to calls ([design/pledge.md](design/pledge.md)) |
 | to listen on another port | the bind fails (Landlock) | `listen tcp/PORT` in the service, and `listen tcp/PORT` in the form's `.net` for fence |
 | to reach another machine: a database, an API | the connect fails (Landlock), and fence drops the packet | `connect tcp/PORT` in the service, and `connect app tcp/PORT` in the form's `.net` |
 | to write outside `/data/svc/app` and `/run/svc/app` | refused; the root is read-only besides | `write PATH` |
-| to run another program: a shell, `curl` | refused; there is no shell in the image anyway | `run PROGRAM` |
+| to run another program: a shell, `curl` | refused (`pledge exec`, then Landlock); there is no shell in the image anyway | `run PROGRAM` |
 | to read a secret | it has none | `secret NAME PATH`: a variable read from a file in the config |
+| to exhaust the machine's memory | capped where the service sets one | `memory MiB`: a ceiling on its address space (RLIMIT_AS). Suits an interpreter (CPython, PHP); the JVM and V8 reserve virtual space eagerly, so size it well above their heap or leave it off |
+
+Every service file states a `pledge`; a form built without one is parked at
+boot, so a service always says what it does. `memfd`, `ipc` (System V
+shared memory) and `watch` (inotify) are promises of their own, off unless
+a service asks, so an application that does not name them cannot make an
+anonymous executable file, squat another service's IPC key, or watch the
+machine's file activity.
 
 A form's `.net` adds to the ones it includes, so `helloworld` needs one only to
 allow more than `python.net` does. To serve on :8000 instead, change
@@ -200,10 +209,19 @@ A Node or Java application is the same on `node` or `jre`. A Node one is
 a jar and a service file:
 
 ```
-exec    /usr/bin/java -XX:-UsePerfData -jar /usr/lib/app/app.jar
+exec    /usr/bin/java -XX:-UsePerfData -Djava.io.tmpdir=/run/svc/app -jar /usr/lib/app/app.jar
 user    app
+pledge  stdio rpath wpath proc inet listen unix
 listen  tcp/8080
 ```
+
+The JVM's pledge is wider than a Python or Node server's: it keeps its own
+temporary files (`wpath`, and `java.io.tmpdir` in its `/run`, since `/tmp`
+is not the service's to write), spawns its compiler and GC threads
+(`proc`), and opens an `AF_UNIX` socket of its own at startup (`unix`). It
+still runs with no `exec`, `memfd`, `ipc` or `watch`, so an interpreted
+exploit has no shell, no anonymous executable memory, and no reach to
+another service's IPC or file activity.
 
 ## webshell-example: a contained vulnerability
 
@@ -232,18 +250,53 @@ $ curl -s 127.0.0.1:8080/attempts.json | python3 -m json.tool
 ```
 
 Every layer shows a different wall: a shell command finds no `/bin/sh`;
-Landlock lets the service exec only its own `python3`, so other binaries
-are refused; the Landlock floor has no `/etc/shadow`, so a secret read is
-denied; the root is read-only, so a write fails; and the form declares no
-`connect`, so fence drops any packet out. Even full Python through the one
+the Landlock floor has no `/etc/shadow`, so a secret read is denied; the
+root is read-only, so a write fails; and the form declares no `connect`,
+so fence drops any packet out. Even full Python through the one
 interpreter that runs cannot read a secret, change the system, persist, or
 call home, and a reboot returns the machine to the signed image.
 
+The execution is real, though, and bounded by the leash, not by an empty
+image. The form ships coreutils and net-tools, and the service's `run`
+line names `id`, `uname`, `hostname`, `cat`, `ls`, `head`, `tail`, `wc`,
+`echo`, `date`, `env`, `pwd` and a couple more.
+
+```sh
+$ curl -s --data-urlencode 'cmd=id' 127.0.0.1:8080             # uid=204(app) gid=204(app) ...
+$ curl -s --data-urlencode 'cmd=cat /etc/passwd' 127.0.0.1:8080  # root:x:0:0:... app:x:204:204:...
+$ curl -s --data-urlencode 'cmd=cat /etc/shadow' 127.0.0.1:8080
+# refused: [Errno 13] Permission denied: '/etc/shadow'         (cat runs; the read is denied)
+$ curl -s --data-urlencode 'cmd=dd if=/dev/zero of=/pwned' 127.0.0.1:8080
+# dd runs, but: dd: failed to open '/pwned': Read-only file system
+$ curl -s --data-urlencode 'cmd=ifconfig' 127.0.0.1:8080
+# refused: ... 'ifconfig'                                      (a separate binary, exec not allowed)
+```
+
+So remote code execution runs here, and two different walls hold it. For a
+program that runs, the leash's read and write floor decides what it may
+touch: `cat /etc/passwd` prints the public account list, but
+`cat /etc/shadow` -- the same allowed `cat` -- is denied the file, and
+`dd` cannot write the read-only root. For which programs run at all,
+Landlock's exec allowlist decides -- but at the granularity of the file,
+not the command name, and **Wolfi's coreutils is one multi-call binary**
+(`/usr/bin/coreutils`, with `cat`, `dd`, `id`, `chroot`, `base64` and the
+rest as symlinks to it). So naming `id` on the `run` line allows every
+coreutils applet, `dd` and `chroot` included; they run, and gain nothing,
+because the floor, the dropped capabilities (`chroot` has no
+`CAP_SYS_CHROOT`) and the empty network still bind them. net-tools ships
+each program as its own file, so `ifconfig` and `route`, which the `run`
+line does not name, are refused at the exec. The lesson the form teaches is
+that `run` whitelists *files*: a multi-call binary is all-or-nothing, and
+the real containment is the floor and the capability and network policy
+around whatever runs, not the list of names.
+
 At boot the application attacks itself with that battery and logs, as JSON
-on the console, that none escaped. `make check` boots it with no shell and
-asserts exactly that (`check-shellfree-webshell-example`,
-[test/console-webshell-example](../test/console-webshell-example)), so the
-claim is tested, not just made.
+on the console, that none escaped; it then runs the three allowlisted
+commands and logs that each ran. `make check` boots it with no shell and
+asserts both -- every attack contained, every allowed command executed
+(`check-shellfree-webshell-example`,
+[test/console-webshell-example](../test/console-webshell-example)) -- so
+the claim is tested, not just made.
 
 To put it where anyone can attack it, on a real VM on the Internet:
 

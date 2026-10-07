@@ -116,35 +116,52 @@ read-only `/proc/sys` with `CAP_SYS_ADMIN` dropped stops remounting it (see
 
 A seccomp filter is inherited by every child and every exec, and can never
 be removed, by root or anyone. Installed by init just before runit, it
-covers every process the machine will run. It denies, with `ENOSYS`, as
-a kernel built without them would answer, so a program that probes for one
-falls back:
+covers every process the machine will run. It **denies by default**: a
+system call is refused unless a promise the machine made allows it
+(pledge.md, System calls: promises), so what no promise names is refused
+even as the kernel gains new calls. A refused call fails with `ENOSYS`, as
+a kernel built without it would answer, so a program that probes for one
+falls back.
+
+The machine's promises are werewolf's own (`seal.base` in lib/seal.zig)
+and every promise its services pledge, which the build gathers from the
+service files. A handful of calls are in **no** promise, refused however a
+form is built:
 
 | Syscalls | Why |
 | --- | --- |
 | `bpf` | all eBPF: no programs, maps, links or BPF LSM programs |
 | `perf_event_open` | perf, and the tracepoint and kprobe attachment BPF uses |
-| `init_module`, `finit_module`, `delete_module` | already closed by `modules_disabled`; denied again for the audit trail |
+| `init_module`, `finit_module`, `delete_module` | already closed by `modules_disabled` |
 | `kexec_load`, `kexec_file_load` | already closed by lockdown and the sysctl |
 | `io_uring_setup`, `io_uring_enter`, `io_uring_register` | makes `io_uring_disabled` permanent |
-| `userfaultfd` | not built in Alpine's kernel; denied in case ours builds it |
+| `userfaultfd` | not built in Alpine's kernel; refused in case ours builds it |
 | `open_by_handle_at`, `name_to_handle_at` | walk past mount and chroot boundaries by inode handle |
 | `add_key`, `keyctl`, `request_key` | the kernel keyring; cryptsetup's use of it is over before init hands over |
-| `process_vm_readv`, `process_vm_writev` | read or write another process; Yama already refuses, denied again for the trail |
-| `acct`, `swapon`, `swapoff`, `quotactl`, `lookup_dcookie`, `uselib`, `iopl`, `ioperm`, `vhangup` | unused here; old, rarely audited code |
-| `modify_ldt` (x86_64) | the LDT, which only 16-bit code needs, and a past exploit primitive; `ia32_emulation=0` already closes `int 0x80`. Done |
+| `process_vm_readv`, `process_vm_writev` | read or write another process; Yama already refuses |
+| `acct`, `swapon`, `swapoff`, `quotactl`, `quotactl_fd`, `lookup_dcookie`, `uselib`, `iopl`, `ioperm`, `vhangup` | unused here; old, rarely audited code |
+| `modify_ldt` (x86_64) | the LDT, which only 16-bit code needs, and a past exploit primitive; `ia32_emulation=0` already closes `int 0x80` |
 
-Done: init installs the filter itself (`seal()`, cmd/init/init.zig), with
-every row above that the architecture has, and the architecture check
-below. `syslog` is not denied, though first listed: busybox's `dmesg`
-reads the kernel's log through it, and test/checks reads it so. No form
-yet asks for `ebpf` or `io_uring`, so those allowances are not built; a
-form that needs one adds it then. posture's `kernel-seal` checks PID 1
-carries a filter, and `kernel-legacy` that `modify_ldt` is refused.
+Done: init installs the filter itself (`seal()`, cmd/init/init.zig), from
+the machine's promises and with the architecture check below. What the
+promises do not allow goes to `seal-watch`, which refuses it (ENOSYS),
+says so once with the promise that would allow it, and counts it for the
+`seal` command; a leashed service holds itself to its own pledge with a
+second filter (leash). `ptrace` is in no promise; `syslog` is its own
+promise (`syslog`), which the base makes, since busybox's `dmesg` reads
+the kernel's log through it and test/checks reads it so. posture's `kernel-seal` checks PID 1 carries a
+filter, `processes-leash-attack` that a service's pledge refuses what it
+did not promise, and `kernel-legacy` that `modify_ldt` is refused.
+`make seal-learn` writes what each form needs by booting it with every
+call allowed and recorded (pledge.md).
 
-The filter looks at syscall numbers only, never arguments. The kernel
-(5.11 and later) then caches, per syscall, that the filter always allows it,
-and skips the filter on those calls, so the table's length costs nothing.
+The machine seal looks at syscall numbers only, never arguments. The
+kernel (5.11 and later) then caches, per syscall, that the filter always
+allows it, and skips the filter on those calls, so the table's length
+costs nothing. A service's own filter (leash) also checks a new socket's
+family, since `inet`, `unix`, `netlink` and `packet` are the family of
+the one `socket` call; a service makes few sockets, so this is not on a
+hot path.
 
 #### What the seal costs
 
@@ -172,15 +189,19 @@ calls the kernel, as `../scan` matching rules, pays nothing. Every program
 in a Docker container pays the same already, under Docker's default
 filter.
 
-werewolf pays it, by choice: it is the one way to close for good, root
-included, what no setting can (`modify_ldt` on x86_64, 32-bit system calls
-on aarch64), and every entry added to the table later costs nothing more.
-Our kernel (*Our kernel*, below) builds `modify_ldt` and the 32-bit
-interfaces out; the seal stays for the rest of the table.
+werewolf pays it, by choice: it is the one way to deny by default for
+good, root included, and to close what no setting can (`modify_ldt` on
+x86_64, 32-bit system calls on aarch64); a longer promise list costs
+nothing more. Our kernel (*Our kernel*, below) builds `modify_ldt` and the
+32-bit interfaces out; the seal denies by default regardless.
 
-It is a deny list, not an allow list. An allow list for every program on
-the machine would break with each glibc or Wolfi update; per-service allow
-lists belong in the services' sandboxes, below.
+It is a deny list, not an allow list: an allow list kept for every
+program on the machine would break with each glibc or Wolfi update. It is
+becoming an allow list of a different kind, of promises rather than system
+calls (pledge.md, System calls: promises): forms say what their services
+do, in a few words, and werewolf alone keeps which calls each word
+brings, so an update that makes a new call for the same work is learned
+once, for every form.
 
 On a 64-bit kernel with compat syscalls built in, the filter checks the
 architecture and kills any 32-bit syscall (done): werewolf ships no 32-bit code,

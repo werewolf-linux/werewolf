@@ -2,5 +2,6 @@
 # read the image, and run only node.
 exec    /usr/bin/node /usr/lib/app/server.js
 user    app
+pledge  stdio rpath wpath proc inet listen
 listen  tcp/8080
 env     NODE_ENV=production

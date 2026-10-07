@@ -32,6 +32,7 @@ die() {
 	exit 1
 }
 command -v gcloud >/dev/null || die "no gcloud; install the Google Cloud SDK and gcloud auth login"
+gcloud version >/dev/null 2>&1 || die "gcloud does not run: $(gcloud version 2>&1 | head -n 2 | tr '\n' ' ')"
 project=${GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}
 [ -n "$project" ] || die "no project: gcloud config set project PROJECT, or GCP_PROJECT"
 zone=${GCP_ZONE:-us-central1-a}

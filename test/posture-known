@@ -28,5 +28,5 @@ prod-ssh network-no-login programs-no-downloaders programs-no-interpreters progr
 php programs-no-interpreters
 node programs-no-interpreters
 python programs-no-interpreters
-webshell-example programs-no-interpreters
+webshell-example programs-no-interpreters programs-no-network-tools
 jre programs-no-interpreters

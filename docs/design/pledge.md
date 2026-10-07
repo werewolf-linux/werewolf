@@ -2,7 +2,7 @@
 
 Proposed, 2026-10-06. The mount broker and the machine-wide rules are
 built (cmd/mount-broker, fence.md's Files); promises are leash's floor,
-less the words.
+less the words. System-call promises (below) are being built.
 
 OpenBSD's `pledge` restricts a program to classes of work, and `unveil` to
 the parts of the filesystem it names. What makes them usable is that a
@@ -82,6 +82,125 @@ its own, never a file every program needs.
 
 The .net files could use the same words: `connect _update dns tcp/443`.
 
+## System calls: promises
+
+The seal (lockdown.md) was a list of 28 system calls refused to everyone.
+It becomes the other way round: a system call is refused unless a promise
+allows it. And the promises are the same words, so a service file says
+what the program does once, and gets the calls, the paths and the ports
+for it:
+
+```
+exec    /usr/bin/python3 /usr/lib/app/main.py
+user    app
+listen  tcp/8080
+pledge  stdio rpath inet listen
+```
+
+No form keeps a list of system calls. Which calls a promise brings is
+werewolf's to know, in one table (lib/seal.zig), for both architectures:
+when a Wolfi update starts making a new call for the same work, the table
+learns it once, and every form has it.
+
+### The words
+
+Each is as narrow as a system call number allows, and the risky ones
+stand alone, so a program that needs one asks for that one:
+
+| Promise | Allows |
+| --- | --- |
+| `stdio` | what every program does with what it already holds: read and write descriptors, memory, time, signals, waiting, polling, pipes, its own ids, terminal ioctls |
+| `rpath` | opening, reading and looking at files and directories |
+| `wpath` | changing them: creating, removing, renaming, linking, modes, owners, times, syncing |
+| `inet` | creating IPv4 and IPv6 sockets |
+| `unix` | creating Unix sockets and socket pairs |
+| `netlink` | creating netlink sockets: reading, and with `netadmin`, changing, addresses and routes |
+| `packet` | creating packet sockets (and the form's `packet` allowance) |
+| `connect` | connecting a socket |
+| `listen` | binding, listening and accepting |
+| `proc` | creating processes and threads, waiting for them, signalling them |
+| `exec` | running another program: one its service file names on a `run` line, as Landlock allows |
+| `setuid` | changing user ids |
+| `setgid` | changing group ids |
+| `setgroups` | changing supplementary groups |
+| `caps` | changing capabilities |
+| `chroot` | changing its root directory |
+| `mount` | mounting, and the new mount API |
+| `umount` | unmounting |
+| `namespace` | entering or making namespaces (`unshare`, `setns`) |
+| `seccomp` | installing a seccomp filter of its own |
+| `landlock` | confining itself with Landlock |
+| `memfd` | anonymous memory files |
+| `ipc` | System V shared memory, semaphores and message queues |
+| `mlock` | locking memory |
+| `settime` | setting the clock |
+| `hostname` | setting the host and domain names |
+| `syslog` | reading the kernel's log |
+
+What no promise allows is refused to everyone: tracing (`ptrace`), and
+the never list, which no word can bring back: eBPF, kernel tracing,
+modules, `kexec`, `io_uring`, `userfaultfd`, open-by-handle, the kernel
+keyring, other processes' memory, 16-bit code and I/O ports, and old calls
+nothing here makes.
+
+### Two filters
+
+The seal, on PID 1, allows the promises werewolf's own programs need (in
+`minimal`), and every promise any service on the machine makes, which
+the build reads from the service files. It reads system call numbers,
+never arguments, so the kernel answers every allowed call from its cache
+and the filter costs nothing more for being long.
+
+leash then gives each service a filter of its own, stacked on the seal,
+of its promises alone. That one may look at arguments, since a service
+creates few sockets: `inet`, `unix`, `netlink` and `packet` are the
+socket's family. So a Python application that pledged `stdio rpath inet
+listen` cannot fork, run a program, make a Unix socket or a memory file,
+or change its ids, even though another service on the machine may.
+
+leash becomes the service by executing a descriptor of its program
+(`execveat`, `AT_EMPTY_PATH`), the one exec a service's filter allows
+without `exec`: and Landlock lets a service execute nothing but its own
+program and what its `run` lines name, so without `exec` it can become
+itself again, and nothing else. The `before` programs, which prepare a
+service (`pg-init`, `nginx -t`), run before the pledge, under the rest of
+the leash.
+
+A service file without a `pledge` line is parked, with the reason on the
+console: there is no default to fall back on. `seal` shows each service's
+pledge, the machine's promises, and what was refused this boot, to whom,
+and which promise would have allowed it.
+
+### When a call is refused
+
+Refused calls fail as if the kernel had no such call (ENOSYS), which
+programs expect of an older kernel and handle. `seal-watch`, which init
+starts before the seal, hears each refusal that the seal's filter refers
+to it, says it once on the console with the promise that would allow it,
+and counts it; `seal` shows what the machine allows and what it refused:
+
+```
+seal-watch: {"event":"refused","call":"memfd_create","promise":"memfd","pid":412}
+```
+
+A DEV=1 build booted with `werewolf.seal=learn` allows and records every
+call instead, with the program that made it and its promise: what a new
+service needs, in the words its service file would use.
+
+### What it cannot tell apart
+
+- **Reading a file from writing one.** `openat` is one call either way;
+  whether a file may be written is Landlock's, by path (leash's `write`).
+  So `rpath` brings `openat`, and `wpath` only what changes a file without
+  opening it.
+- **One `ioctl` or `prctl` from another.** Both are in `stdio`, as almost
+  every program makes them (a terminal's size; a thread's name). What they
+  could do that matters is held elsewhere: capabilities, no_new_privs,
+  Landlock on device files.
+- **A namespace made by `clone`.** Its flags are arguments. User
+  namespaces are off for everyone (lockdown.md), and the rest need
+  `CAP_SYS_ADMIN`, which no service holds.
+
 ## Order
 
 1. The mount broker, which the machine-wide rules depend on. Done:
@@ -90,12 +209,24 @@ The .net files could use the same words: `connect _update dns tcp/443`.
    3 ask it, through lib/broker.zig.
 2. The machine-wide rules, in `fence`. Done (fence.md, Files);
    `posture`'s `files-system-writes` checks them.
-3. Promises in service files, with `leash`.
+3. Promises in service files, with `leash`: paths and ports (Services:
+   promises), and system calls (System calls: promises), with the seal
+   following them.
 
 ## Not covered
 
 - **Scripts and memory.** Landlock judges `execve`, not an interpreter
-  reading a script, nor `mmap` of executable memory (verified-boot.md).
+  reading a script, nor `mmap` of executable memory (verified-boot.md). A
+  runtime form is an interpreter by design; its promises decide what the
+  interpreter may then call, so native shellcode from `mmap` is bound by
+  the same seccomp filter as the program, and reaches no more than its
+  pledge allows.
+- **`stat` and `inotify`.** Landlock mediates neither as of ABI 9: a
+  confined program can `stat` any path (existence, size, mode leak, not
+  contents), and `inotify` on a directory it cannot read would see file
+  events by name. So watching is its own promise (`watch`), off unless a
+  service asks; `stat` stays open, and secrets are kept out of paths, in
+  `/run/config`, root's alone.
 - **Reading `/proc`.** Left open; `hidepid` keeps other users' processes
   out of view.
 - **Connecting to a Unix socket by path.** Linux 6.18's Landlock does not

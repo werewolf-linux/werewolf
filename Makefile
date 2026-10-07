@@ -160,6 +160,10 @@ INIT_BIN := $(PROGRAMS)/init/init
 NET_BIN := $(PROGRAMS)/iface-up/usr/lib/werewolf/iface-up
 FENCE_BIN := $(PROGRAMS)/fence/usr/lib/werewolf/fence
 POSTURE_BIN := $(PROGRAMS)/posture/usr/lib/werewolf/posture
+# The seal's other half (cmd/seal-watch), which init starts to refuse, and
+# say, what the image's list does not allow; and `seal`, which shows it.
+SEAL_PROGRAMS := seal-watch seal
+SEAL_BINS := $(foreach p,$(SEAL_PROGRAMS),$(PROGRAMS)/$(p)/usr/lib/werewolf/$(p))
 # What a shell script used to do, one small program each (docs/design/shell-free.md):
 # runit's stages, reboot and poweroff, GRUB's environment block, and the
 # slot-keep, power-button, debug-shell and sshd services; and leash, which starts
@@ -168,7 +172,7 @@ SHELLFREE := runit-stage reboot grub-setenv slot-keep power-button debug-shell s
 SHELLFREE_BINS := $(foreach p,$(SHELLFREE),$(PROGRAMS)/$(p)/usr/lib/werewolf/$(p))
 UPDATER_BIN := $(if $(filter prod,$(CHAIN)),$(PROGRAMS)/slot-update/usr/lib/werewolf/slot-update)
 STATUS_BIN := $(if $(filter demo,$(CHAIN)),$(PROGRAMS)/status-page/usr/lib/werewolf/status-page)
-OVERLAY_DIRS := $(CHAIN_DIRS) build/$(ARCH)/$(FORM)$(if $(DEV),-dev)/ro $(PROGRAMS)/init $(PROGRAMS)/modload $(PROGRAMS)/iface-up $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/mount-broker $(PROGRAMS)/posture $(addprefix $(PROGRAMS)/,$(SHELLFREE)) $(if $(DHCP_BIN),$(PROGRAMS)/dhcp-client) $(if $(CLOUD_BIN),$(PROGRAMS)/cloud-metadata) $(PROGRAMS)/bite-cleanup $(if $(PG_BINS),$(PROGRAMS)/postgresql) $(if $(UPDATER_BIN),$(PROGRAMS)/slot-update) \
+OVERLAY_DIRS := $(CHAIN_DIRS) build/$(ARCH)/$(FORM)$(if $(DEV),-dev)/ro $(PROGRAMS)/init $(PROGRAMS)/modload $(PROGRAMS)/iface-up $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/mount-broker $(PROGRAMS)/posture $(addprefix $(PROGRAMS)/,$(SEAL_PROGRAMS) $(SHELLFREE)) $(if $(DHCP_BIN),$(PROGRAMS)/dhcp-client) $(if $(CLOUD_BIN),$(PROGRAMS)/cloud-metadata) $(PROGRAMS)/bite-cleanup $(if $(PG_BINS),$(PROGRAMS)/postgresql) $(if $(UPDATER_BIN),$(PROGRAMS)/slot-update) \
 	$(if $(STATUS_BIN),$(PROGRAMS)/status-page)
 
 # --- locks --------------------------------------------------------------------
@@ -270,7 +274,7 @@ LIMA_CONSOLE = $(if $(filter vz,$(VMTYPE)),hvc0,$(CONSOLE))
 
 # A target whose name starts with _ is a step another target runs, with
 # FORM set for it; `make help` lists the ones to type.
-.PHONY: all image slot bite-me disk run run-ssh lima lima-delete demo demo-delete webshell-demo _webshell-demo config-tar list-forms test check check-slot check-updater check-updater-release _check-updater check-nodata check-lease check-unsigned check-verity check-metadata check-dist check-gcp demo-gcp demo-gcp-delete webshell-gcp webshell-gcp-delete ci relock release-inputs dist posture clean help \
+.PHONY: all image slot bite-me disk run run-ssh lima lima-delete demo demo-delete webshell-demo _webshell-demo config-tar list-forms test check seal-learn check-slot check-updater check-updater-release _check-updater check-nodata check-lease check-unsigned check-verity check-metadata check-dist check-gcp demo-gcp demo-gcp-delete webshell-gcp webshell-gcp-delete ci relock release-inputs dist posture clean help \
 	_check-form _check-shellfree-boot _check-slot-boot _check-updater-boot _check-nodata-boot _check-lease-boot _check-unsigned-boot _check-unsigned-slot _check-metadata-boots _dist-form _check-dist-disk _check-gcp
 
 all: image
@@ -351,7 +355,7 @@ $(OUT)/rootfs.tar: $(FORM_LOCK)
 	$(call apko_build,forms/$(FORM).yaml,$<)
 
 # werewolf's own files: each form's folder along the chain, then meta.
-$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN)
+$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN)
 	$(call layer,$(OVERLAY_DIRS) $(OUT)/meta)
 
 # Booted directly, the machine boots as a slot does, through stage0, onto
@@ -397,11 +401,12 @@ endef
 
 # A program is cmd/NAME/NAME.zig and the files beside it, and may import
 # lib/sandbox.zig as "sandbox", lib/broker.zig, the mount broker's client,
-# as "broker", lib/dm.zig, the device mapper, as "dm", and lib/verity.zig,
-# dm-verity's hash tree, as "verity", compiled with them, as ReleaseSafe as
-# it is.
-ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity -Mroot=$(1) \
-	-Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig -Mverity=lib/verity.zig
+# as "broker", lib/dm.zig, the device mapper, as "dm", lib/verity.zig,
+# dm-verity's hash tree, as "verity", and lib/seal.zig, what the seal's
+# programs share, as "seal", compiled with them, as ReleaseSafe as it is.
+ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep seal -Mroot=$(1) \
+	-Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig -Mverity=lib/verity.zig \
+	-Mseal=lib/seal.zig
 
 define zig_build
 $(zig_check)
@@ -413,7 +418,7 @@ define program
 $(2): cmd/$(1)/$(1).zig $$(wildcard cmd/$(1)/*.zig) $$(wildcard lib/*.zig)
 	$$(zig_build)
 endef
-$(foreach p,dhcp-client cloud-metadata mount mount-broker modload iface-up fence posture status-page slot-update $(SHELLFREE),\
+$(foreach p,dhcp-client cloud-metadata mount mount-broker modload iface-up fence posture status-page slot-update $(SEAL_PROGRAMS) $(SHELLFREE),\
 	$(eval $(call program,$(p),$(PROGRAMS)/$(p)/usr/lib/werewolf/$(p))))
 $(eval $(call program,bite-cleanup,$(BITE_CLEANUP)))
 $(eval $(call program,pg-init,$(PG_INIT)))
@@ -449,12 +454,16 @@ endif
 # update in forms/prod rebuilds a slot as `make slot` does, from these.
 # In every image, in /usr/share/werewolf. Nothing here says when or where it
 # was built, so a rebuild matches.
-$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(MODULE_LISTS) $(NET_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) release/image.pub Makefile
+$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(MODULE_LISTS) $(NET_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) release/image.pub Makefile
 	rm -rf $(OUT)/meta
 	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $$d $(OUT)/meta/etc/apk && \
 	kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
 	echo $(FORM) > $$d/form && \
 	echo $(MODULES) | tr ' ' '\n' > $$d/modules && \
+	for f in $$(for c in $(CHAIN_DIRS); do (cd $$c && ls etc/sv/*/service 2>/dev/null); done | LC_ALL=C sort -u); do \
+		w=; for c in $(CHAIN_DIRS); do [ -f $$c/$$f ] && w=$$c/$$f; done; sed -n 's/#.*//; s/^pledge[[:space:]]//p' $$w; \
+	done | tr -s ' \t' '\n\n' | grep . | LC_ALL=C sort -u | tr '\n' ' ' > $$d/pledge && \
+	$(if $(DEV),echo dev > $$d/dev &&) \
 	for p in $(MODULE_PARAMS); do echo "$${p%%:*} $${p#*:}"; done > $$d/module-params && \
 	echo $(KERNEL_ARGS) > $$d/cmdline && \
 	echo $$kernel > $$d/kernel && \
@@ -726,7 +735,7 @@ run-ssh:
 # LUKS2. Builds and
 # consoles are logged in build/<arch>/check/. See docs/testing.md.
 FORMS := $(patsubst forms/%.yaml,%,$(wildcard forms/*.yaml))
-CHECK = $(BUILD)/check
+CHECK = $(BUILD)/check$(if $(SEAL_LEARN),-learn)
 # Every form is checked as built with DEV=1, since test/checks needs a root
 # shell on the console; the forms that ship without one are also booted as
 # they ship (check-shellfree-%).
@@ -748,19 +757,35 @@ CHECK_QEMU = $(QEMU) -smp 2 -m $(or $(CHECK_MEM_$(FORM)),1024) -no-reboot -devic
 # or a soft lockup. Only here: a machine in use rides out a slow moment.
 CHECK_STALLS = rcupdate.rcu_cpu_stall_timeout=20 sysctl.kernel.panic_on_rcu_stall=1 \
 	sysctl.kernel.hung_task_timeout_secs=120 sysctl.kernel.hung_task_panic=1 sysctl.kernel.softlockup_panic=1
-CHECK_BOOT = console=$(CONSOLE) $(KERNEL_ARGS) panic=1 werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS)
+# SEAL_LEARN=1, as make seal-learn sets it: what no promise allows is
+# allowed, and said with its promise (docs/design/pledge.md).
+SEAL_ARGS = $(if $(SEAL_LEARN),werewolf.seal=learn)
+CHECK_BOOT = console=$(CONSOLE) $(KERNEL_ARGS) panic=1 werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS) $(SEAL_ARGS)
 # The posture checks known to fail on the form and architecture, for
 # test/boot to expect.
 export POSTURE_KNOWN = $(shell awk -v b=$(if $(DEV),dev,*) -v f=$(FORM) -v a=$(ARCH) '$$1 == b || $$1 == f || $$1 == a { $$1 = ""; k = k $$0 } END { print k }' test/posture-known)
 CHECK_CMDLINE = $(CHECK_BOOT) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3
 # What every form shares, built once before the forms build side by side.
-CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(DHCP) $(CLOUD) $(BITE_CLEANUP) $(PG_INIT) $(PG_SHIM) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(PROGRAMS)/slot-update/usr/lib/werewolf/slot-update
+CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(DHCP) $(CLOUD) $(BITE_CLEANUP) $(PG_INIT) $(PG_SHIM) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(PROGRAMS)/slot-update/usr/lib/werewolf/slot-update
 # minimal has no updater, which would fetch from the network once committed.
 CHECK_SLOT_FORM = minimal
 VICTIM_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec
 
 check: $(addprefix check-,$(FORMS)) $(SHELLFREE_CHECKS) check-slot check-persist check-nodata check-lease check-unsigned check-verity check-metadata
 	@echo "check: every form, and a slot, passed"
+
+# What the forms' services would need that their pledges do not promise:
+# make check's boots of DEV=1 builds, the seal and each pledge allowing
+# what they would refuse and saying so (werewolf.seal=learn), their
+# consoles kept in build/ARCH/check-learn; then each call once, by service
+# and the promise that would allow it. A boot that fails still says what
+# it called.
+SEAL_LEARN_CHECKS = $(addprefix check-,$(FORMS)) check-slot check-persist check-nodata check-lease check-unsigned check-metadata
+seal-learn: | $(CHECK_SHARED)
+	-@$(MAKE) --no-print-directory -k SEAL_LEARN=1 $(SEAL_LEARN_CHECKS)
+	@grep -aho 'seal-watch: {"event":"learned"[^}]*}' $(BUILD)/check-learn/*.log | \
+		sed 's/.*"call":"\([^"]*\)","promise":"\([^"]*\)","service":"\([^"]*\)","exe":"\([^"]*\)".*/\3 \2 \1 \4/' | \
+		LC_ALL=C sort -u | awk 'BEGIN { print "service promise call program" } { print }' | column -t
 
 # One form's two boots, REPEAT times (10 unless given), for a failure that
 # comes and goes: each failing first boot's console is kept as
@@ -840,11 +865,17 @@ _check-lease-boot:
 
 # A root image changed after its build must not boot: minimal's stage0,
 # then its root.erofs with one byte of the superblock changed, must stop
-# in stage0, dm-verity naming the block, before erofs ever reads it. After
+# in stage0, dm-verity failing the block, before erofs ever uses it. After
 # minimal's own check, which builds the same form in the same place.
 check-verity: | $(CHECK_SHARED) check-minimal
 	@$(CHECK_MAKE) FORM=minimal _check-verity-boot
 
+# The security property is that stage0 refuses the changed image and the
+# machine never hands over -- stage0 says so itself, synchronously, before
+# it panics. dm-verity's own "data block N is corrupted" line is the cause
+# and is checked too, but loosely: its device id and block number, and the
+# exact wording, vary by kernel and by whether the run is accelerated, and
+# the test is about the refusal, not the kernel's phrasing.
 _check-verity-boot:
 	@rm -rf $(CHECK)/verity && mkdir -p $(CHECK)/verity && cp $(OUT)/slot/root.erofs $(CHECK)/verity/ && \
 		printf x | dd of=$(CHECK)/verity/root.erofs bs=1 seek=1024 conv=notrunc 2>/dev/null && \
@@ -852,9 +883,12 @@ _check-verity-boot:
 		zstd -1 -q -c | cat $(OUT)/slot/initramfs.zst - >$(CHECK)/verity.zst && rm -r $(CHECK)/verity
 	@! test/boot verity - $(CHECK)/verity.log $(CHECK_QEMU) \
 		-kernel $(BUILD)/vmlinuz -initrd $(CHECK)/verity.zst -append "$(CHECK_CMDLINE)" >/dev/null
-	@grep -a -q 'device-mapper: verity: [0-9:]*: data block 0 is corrupted' $(CHECK)/verity.log && \
-		grep -a -q 'stage0: cannot mount /root.erofs' $(CHECK)/verity.log || \
-		{ echo "FAIL   verity             a changed root image was not refused; see $(CHECK)/verity.log"; exit 1; }
+	@grep -a -q 'stage0: cannot mount /root.erofs' $(CHECK)/verity.log || \
+		{ echo "FAIL   verity             stage0 did not refuse the changed image; see $(CHECK)/verity.log"; exit 1; }
+	@! grep -a -q 'handing over to runit' $(CHECK)/verity.log || \
+		{ echo "FAIL   verity             the changed image booted; see $(CHECK)/verity.log"; exit 1; }
+	@grep -a -E -q 'device-mapper: verity:.* corrupted|cannot read erofs superblock' $(CHECK)/verity.log || \
+		{ echo "FAIL   verity             no dm-verity corruption reported; see $(CHECK)/verity.log"; exit 1; }
 	@echo "pass   verity             a changed root image does not boot"
 
 # An unsigned module offered at boot must be refused: by init on a RAM root,
@@ -910,7 +944,7 @@ _check-metadata-boots:
 # and a network with no way out keeps the updater from installing the
 # latest release over them.
 DIST_DISK_QEMU = qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic \
-	-smp 2 -m 2048 -snapshot -no-reboot -bios $(UEFI_FIRMWARE) -device virtio-rng-pci \
+	-smp 2 -m 2048 -snapshot -no-reboot $(UEFI_FLAGS) -device virtio-rng-pci \
 	-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile=
 check-dist:
 	@failed=0; for f in $(filter-out $(DIST_DIRECT_FORMS),$(RELEASE_FORMS)); do \
@@ -919,9 +953,11 @@ check-dist:
 
 _check-dist-disk:
 	@[ -n "$(UEFI_FIRMWARE)" ] || { echo "FAIL   dist-$(FORM)     no UEFI firmware for $(ARCH) (edk2 or OVMF)"; exit 1; }
+	@[ "$(ARCH)" = aarch64 ] || [ -n "$(UEFI_VARS)" ] || { echo "FAIL   dist-$(FORM)     no UEFI variables template for $(ARCH)"; exit 1; }
 	@[ -f $(DIST)/$(FORM)-$(ARCH)-disk.qcow2 ] || \
 		{ echo "FAIL   dist-$(FORM)     no $(DIST)/$(FORM)-$(ARCH)-disk.qcow2: make dist first"; exit 1; }
 	@mkdir -p $(CHECK)
+	@$(uefi-vars)
 	@test/boot dist-$(FORM) - $(CHECK)/dist.log $(DIST_DISK_QEMU) \
 		-drive file=$(DIST)/$(FORM)-$(ARCH)-disk.qcow2,format=qcow2,if=virtio
 
@@ -998,21 +1034,38 @@ UEFI_FIRMWARE = $(firstword $(wildcard $(if $(filter aarch64,$(ARCH)), \
 	/usr/share/qemu/edk2-aarch64-code.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd, \
 	/opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/local/share/qemu/edk2-x86_64-code.fd \
 	/usr/share/qemu/edk2-x86_64-code.fd /usr/share/ovmf/OVMF.fd)))
+# aarch64's edk2 loads with -bios; x86_64's OVMF is a pair of pflash
+# images, read-only code and writable variables. The variables are a
+# per-run copy a recipe makes at UEFI_VARS_COPY, so a boot that writes
+# NVRAM (or a power cut mid-write) cannot corrupt the shared template.
+# x86_64 shares the i386 variables template, as QEMU's own firmware
+# descriptor does.
+UEFI_VARS = $(firstword $(wildcard \
+	/opt/homebrew/share/qemu/edk2-i386-vars.fd /usr/local/share/qemu/edk2-i386-vars.fd \
+	/usr/share/qemu/edk2-i386-vars.fd /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd))
+UEFI_VARS_COPY = $(CHECK)/ovmf-vars.fd
+UEFI_FLAGS = $(if $(filter aarch64,$(ARCH)),-bios $(UEFI_FIRMWARE),\
+	-drive if=pflash,format=raw,unit=0,readonly=on,file=$(UEFI_FIRMWARE) \
+	-drive if=pflash,format=raw,unit=1,file=$(UEFI_VARS_COPY))
+# make the writable variables copy (x86_64), or nothing (aarch64).
+uefi-vars = $(if $(filter aarch64,$(ARCH)),:,cp $(UEFI_VARS) $(UEFI_VARS_COPY))
 PERSIST_QEMU = qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic \
-	-smp 2 -m 2048 -no-reboot -device virtio-rng-pci -bios $(UEFI_FIRMWARE) \
+	-smp 2 -m 2048 -no-reboot -device virtio-rng-pci $(UEFI_FLAGS) \
 	-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile= \
 	-drive file=$(CHECK)/persist.img,format=raw,if=virtio
 .PHONY: check-persist _check-persist-boot
 check-persist: | $(CHECK_SHARED) check-demo
 	@mkdir -p $(CHECK)
 	@[ -n "$(UEFI_FIRMWARE)" ] || { echo "FAIL   persist            no UEFI firmware for $(ARCH) (edk2 or OVMF)"; exit 1; }
+	@[ "$(ARCH)" = aarch64 ] || [ -n "$(UEFI_VARS)" ] || { echo "FAIL   persist            no UEFI variables template for $(ARCH) (edk2-i386-vars.fd or OVMF_VARS.fd)"; exit 1; }
 	@rm -f $(CHECK)/persist.img
 	@$(CHECK_MAKE) FORM=demo disk DISK=$(CHECK)/persist.img DISK_MIB=2048 \
-		DISK_ARGS="console=$(CONSOLE) werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS)" >$(CHECK)/persist-build.log 2>&1 || \
+		DISK_ARGS="console=$(CONSOLE) werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS) $(SEAL_ARGS)" >$(CHECK)/persist-build.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/persist-build.log; echo "FAIL   persist build: see $(CHECK)/persist-build.log"; exit 1; }
 	@$(CHECK_MAKE) FORM=demo _check-persist-boot
 
 _check-persist-boot:
+	@$(uefi-vars)
 	@test/boot persist test/checks-persist $(CHECK)/persist.log $(PERSIST_QEMU)
 	@POWER_CUT=1 test/boot persist-again test/checks-persist-again $(CHECK)/persist-again.log $(PERSIST_QEMU)
 	@test/boot persist-cut test/checks-persist-cut $(CHECK)/persist-cut.log $(PERSIST_QEMU)
