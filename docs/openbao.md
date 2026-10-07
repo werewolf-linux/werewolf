@@ -65,7 +65,7 @@ same trust the tar already carries for `data.key`. Rotating the key is
 ## Checked
 
 `make check-openbao` makes a key, a certificate for `localhost` and the
-password `werewolf-check` ([test/config-openbao](../test/config-openbao))
+hash of `werewolf-check` ([test/config-openbao](../test/config-openbao))
 and runs [test/checks-openbao](../test/checks-openbao): `sys/health`
 says initialized and unsealed; plain HTTP is refused; the admin logs in
 with that password and a wrong one is refused; the admin's token lists the
