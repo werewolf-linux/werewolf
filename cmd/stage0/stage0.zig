@@ -29,7 +29,9 @@
 //!
 //! It is the kernel's first process, so it uses the kernel directly: no
 //! shell, no blkid, no mount program. It finds the filesystem by reading
-//! each block device's superblock for the UUID.
+//! each block device's superblock for the UUID, and refuses two: the root
+//! image is verified, but /data and the config tar come from that
+//! filesystem too, and a clone attached beside it must not stand in.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -92,6 +94,10 @@ pub fn main(init: std.process.Init) !void {
         } else |_| false;
         if (!ok) say("not every module loaded; see above", .{});
     }
+    // The initramfs stays in RAM after the switch, as nothing frees it:
+    // its modules, loaded or refused now, would hold 14 MB for good.
+    std.Io.Dir.cwd().deleteTree(io, "/usr/lib/modules") catch |err|
+        say("modules not freed: {s}", .{@errorName(err)});
     const modules_ms = bootMs();
 
     var img: [:0]const u8 = "/root.erofs";
@@ -202,13 +208,19 @@ pub fn main(init: std.process.Init) !void {
 /// through PID 1's root for the mark slot-keep leaves; without it, it reboots
 /// at once. The loader has spent this slot's one boot, so the machine comes
 /// back on the slot that last committed. It touches no file of the
-/// initramfs once it sleeps, and reaches PID 1 through a /proc of its own.
+/// initramfs once it sleeps, and reaches PID 1 through a /proc of its own,
+/// and the kernel's log through a descriptor opened now: /dev moves into
+/// the new root, leaving this one's empty.
 fn deadman(slot: []const u8) void {
     mkdir("/deadman");
     mountFs("proc", "/deadman", "proc", MS.NOSUID | MS.NODEV | MS.NOEXEC);
+    const kmsg = linux.open("/dev/kmsg", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
     const pid = linux.fork();
     if (linux.errno(pid) != .SUCCESS) fail("cannot start the deadman", .{});
-    if (pid != 0) return;
+    if (pid != 0) {
+        if (linux.errno(kmsg) == .SUCCESS) _ = linux.close(@intCast(kmsg));
+        return;
+    }
 
     var ts: linux.timespec = .{ .sec = deadman_after, .nsec = 0 };
     while (linux.errno(linux.nanosleep(&ts, &ts)) == .INTR) {}
@@ -222,7 +234,8 @@ fn deadman(slot: []const u8) void {
             "<2>stage0: slot {s} did not commit in 10 minutes; rebooting into the last good slot\n",
             .{slot},
         ) catch "";
-        _ = writeFile("/dev/kmsg", msg); // reaches the console before the sysrq reboot; see fail()
+        // Reaches the console before the sysrq reboot; see fail().
+        if (linux.errno(kmsg) == .SUCCESS) _ = linux.write(@intCast(kmsg), msg.ptr, msg.len);
         _ = writeFile("/deadman/sysrq-trigger", "b");
     }
     linux.exit(0);
@@ -307,31 +320,46 @@ const Found = struct { dev: [:0]const u8, kind: Kind };
 
 /// The block device whose filesystem has uuid, waiting for it to appear:
 /// its driver is still loading, or probing, as the search begins. Looked
-/// for every 10 ms, so the boot goes on the moment it is there.
+/// for every 10 ms, so the boot goes on the moment it is there. Two that
+/// answer to it, and stage0 fails rather than guess, as the mount broker
+/// does: the loader falls back, and so will the other slot, until the
+/// second is gone.
 fn findFilesystem(gpa: std.mem.Allocator, uuid: []const u8) ?Found {
     const want = parseUuid(uuid) orelse return null;
     var waited: usize = 0;
     while (waited < find_for * 100) : (waited += 1) {
-        if (scan(gpa, want)) |f| return f;
+        switch (scan(gpa, want)) {
+            .none => {},
+            .one => |f| return f,
+            .two => |d| fail(
+                "{s} and {s} both hold filesystem {s}, as a clone or snapshot attached " ++
+                    "beside the disk would; refusing to guess",
+                .{ d[0], d[1], uuid },
+            ),
+        }
         var ts: linux.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
         _ = linux.nanosleep(&ts, null);
     }
     return null;
 }
 
-/// Each block device, its superblock read for want.
-fn scan(gpa: std.mem.Allocator, want: [16]u8) ?Found {
+const Scan = union(enum) { none, one: Found, two: [2][:0]const u8 };
+
+/// Each block device, its superblock read for want: every one, so that a
+/// second with the same UUID is seen.
+fn scan(gpa: std.mem.Allocator, want: [16]u8) Scan {
     const dir = linux.open(
         "/sys/class/block",
         .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true },
         0,
     );
-    if (linux.errno(dir) != .SUCCESS) return null;
+    if (linux.errno(dir) != .SUCCESS) return .none;
     defer _ = linux.close(@intCast(dir));
+    var found: ?Found = null;
     var buf: [4096]u8 align(8) = undefined;
     while (true) {
         const n = linux.getdents64(@intCast(dir), &buf, buf.len);
-        if (linux.errno(n) != .SUCCESS or n == 0) return null;
+        if (linux.errno(n) != .SUCCESS or n == 0) break;
         var off: usize = 0;
         while (off < n) {
             const ent: *align(1) const linux.dirent64 = @ptrCast(&buf[off]);
@@ -340,9 +368,11 @@ fn scan(gpa: std.mem.Allocator, want: [16]u8) ?Found {
             if (name[0] == '.') continue;
             const dev = gpa.printSentinel("/dev/{s}", .{name}, 0) catch continue;
             const kind = superblock(dev, want) orelse continue;
-            return .{ .dev = dev, .kind = kind };
+            if (found) |f| return .{ .two = .{ f.dev, dev } };
+            found = .{ .dev = dev, .kind = kind };
         }
     }
+    return if (found) |f| .{ .one = f } else .none;
 }
 
 /// The filesystem on dev, if its UUID is want.
@@ -384,7 +414,10 @@ fn parseUuid(s: []const u8) ?[16]u8 {
             i += 1;
             continue;
         }
-        out[j] = std.fmt.parseInt(u8, s[i .. i + 2], 16) catch return null;
+        // Two hex digits, and nothing parseInt would also take, such as +.
+        const hi = std.fmt.charToDigit(s[i], 16) catch return null;
+        const lo = std.fmt.charToDigit(s[i + 1], 16) catch return null;
+        out[j] = hi << 4 | lo;
         j += 1;
         i += 2;
     }
@@ -475,14 +508,14 @@ fn readAll(gpa: std.mem.Allocator, path: [:0]const u8) []const u8 {
     return out.items;
 }
 
-/// Whether argv runs and exits 0, its output on the console with ours.
+/// One line on the console.
 fn say(comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
     const line = std.mem.print(&buf, "stage0: " ++ fmt ++ "\n", args) catch return;
     _ = linux.write(1, line.ptr, line.len);
 }
 
-/// Exiting PID 1 panics the kernel; panic=1 reboots it, and the loader
+/// Exiting PID 1 panics the kernel; panic= reboots it, and the loader
 /// boots the slot that last committed. The reason goes through /dev/kmsg,
 /// which a serial console writes synchronously ("<2>", KERN_CRIT, so it
 /// prints whatever the console log level): a plain write to the console tty
@@ -550,6 +583,8 @@ test parseUuid {
     );
     try testing.expectEqual(null, parseUuid("57e1f000x77e2-4b0f-8a3c-0000000000a0"));
     try testing.expectEqual(null, parseUuid("57e1f000-77e2-4b0f-8a3c-0000000000a"));
+    try testing.expectEqual(null, parseUuid("57e1f000-77e2-4b0f-8a3c-0000000000+a"));
+    try testing.expectEqual(null, parseUuid("57e1f000-77e2-4b0f-8a3c-00000000000g"));
 }
 
 test identify {

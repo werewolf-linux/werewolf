@@ -102,13 +102,13 @@ pub fn buildSlot(u: *Update, arch: []const u8, new_kernel: []const u8) !void {
     const tree = try verity.build(u.gpa, io, image);
     try image.writePositionalAll(io, tree.tree, try image.length(io));
 
-    // Alpine's arm64 kernel is an EFI zboot image; the slot carries the raw
-    // Image inside it, as the build does (see Makefile).
+    // The kernel as Alpine ships it, as the build lays it in a slot
+    // (Makefile): on arm64 an EFI zboot image, which systemd-boot runs as
+    // it is, and install unwraps for GRUB, which cannot.
     u.step = "vmlinuz";
     const k: Root = try .open(u, work_dir ++ "/kernel");
     defer k.close(u);
-    const vmlinuz = try k.read(u, "boot/vmlinuz-virt");
-    try u.write(work_dir ++ "/slot/vmlinuz", try unwrapZboot(u.gpa, vmlinuz));
+    try u.write(work_dir ++ "/slot/vmlinuz", try k.read(u, "boot/vmlinuz-virt"));
 
     u.step = "stage0";
     const s = work_dir ++ "/stage0";
@@ -192,7 +192,9 @@ pub fn install(u: *Update, build: []const u8) !void {
         else => return err,
     };
     try u.run(&.{ "/usr/lib/werewolf/grub-setenv", env, "next_entry", "" });
-    // Each through a temporary name (copyFile), so whole or absent.
+    // Each through a temporary name, so whole or absent. The kernel
+    // unwrapped: GRUB cannot run arm64's EFI zboot image, only the Image
+    // inside it.
     try Dir.cwd().copyFile(
         work_dir ++ "/slot/root.erofs",
         Dir.cwd(),
@@ -200,15 +202,17 @@ pub fn install(u: *Update, build: []const u8) !void {
         io,
         .{},
     );
-    for (&[_][]const u8{ "vmlinuz", "initramfs.zst" }) |f| {
-        try Dir.cwd().copyFile(
-            try u.gpa.print("{s}/slot/{s}", .{ work_dir, f }),
-            Dir.cwd(),
-            try u.gpa.print("{s}/{s}", .{ kdir, f }),
-            io,
-            .{},
-        );
-    }
+    try u.writeReplacing(
+        try u.gpa.print("{s}/vmlinuz", .{kdir}),
+        try unwrapZboot(u.gpa, try u.read(work_dir ++ "/slot/vmlinuz")),
+    );
+    try Dir.cwd().copyFile(
+        work_dir ++ "/slot/initramfs.zst",
+        Dir.cwd(),
+        try u.gpa.print("{s}/initramfs.zst", .{kdir}),
+        io,
+        .{},
+    );
     linux.sync();
     // The image's kernel arguments, which bite's entries read from
     // GRUB's environment for each slot, so an update's new arguments
@@ -1152,17 +1156,14 @@ fn moduleList(gpa: Allocator, order: []const []const u8, params: []const u8) ![]
     return out.written();
 }
 
-/// Alpine's arm64 vmlinuz is an EFI zboot image: "MZ", "zimg", then the
-/// gzipped Image's offset and size as little-endian u32. Anything else is
-/// returned as it is.
-/// A gzip stream, inflated.
+/// A gzip stream, inflated: at most max_read bytes of it.
 fn gunzip(gpa: Allocator, data: []const u8) ![]const u8 {
     var in: Io.Reader = .fixed(data);
-    var window: [std.compress.flate.max_window_len]u8 = undefined;
-    var gz: std.compress.flate.Decompress = .init(&in, .gzip, &window);
-    var out: Io.Writer.Allocating = .init(gpa);
-    _ = try gz.reader.streamRemaining(&out.writer);
-    return out.written();
+    var gz: std.compress.flate.Decompress = .init(&in, .gzip, &.{});
+    return gz.reader.allocRemaining(gpa, .limited(max_read)) catch |err| switch (err) {
+        error.ReadFailed => return gz.err orelse error.ReadFailed,
+        else => return err,
+    };
 }
 
 /// kernel/fs/ext4/ext4.ko.gz -> kernel/fs/ext4/ext4.ko
@@ -1170,17 +1171,15 @@ fn withoutGz(path: []const u8) []const u8 {
     return if (std.mem.endsWith(u8, path, ".gz")) path[0 .. path.len - 3] else path;
 }
 
+/// The Image inside arm64's EFI zboot image: "MZ", "zimg", then the
+/// gzipped Image's offset and size as little-endian u32. Anything else is
+/// returned as it is.
 fn unwrapZboot(gpa: Allocator, image: []const u8) ![]const u8 {
     if (image.len < 16 or !std.mem.eql(u8, image[4..8], "zimg")) return image;
     const off = std.mem.readInt(u32, image[8..12], .little);
     const size = std.mem.readInt(u32, image[12..16], .little);
     if (@as(u64, off) + size > image.len) return error.BadZboot;
-    var in: Io.Reader = .fixed(image[off .. off + size]);
-    var window: [std.compress.flate.max_window_len]u8 = undefined;
-    var gz: std.compress.flate.Decompress = .init(&in, .gzip, &window);
-    var out: Io.Writer.Allocating = .init(gpa);
-    _ = try gz.reader.streamRemaining(&out.writer);
-    return out.written();
+    return gunzip(gpa, image[off .. off + size]);
 }
 
 const Node = struct {

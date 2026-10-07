@@ -2,7 +2,8 @@
 #
 # Build
 #   make install-deps    install apko, Zig, QEMU, erofs-utils and the rest, after
-#                        asking: macOS, Debian, Ubuntu, Fedora, Arch, FreeBSD
+#                        asking: macOS, Debian, Ubuntu, Fedora, Arch; FreeBSD and
+#                        NetBSD, experimental, with gmake (tools/install-deps)
 #   make                 the image: build/<arch>/vmlinuz, build/<arch>/<form>/initramfs.zst
 #   make slot            build/<arch>/<form>/slot/: vmlinuz, stage0, root.erofs, for bite
 #   make disk            build/<arch>/<form>/disk.img: a UEFI boot disk of the slot;
@@ -301,9 +302,11 @@ else
 MACHINE = q35
 CONSOLE = ttyS0
 endif
-# A Linux host without /dev/kvm (some CI runners) emulates, slowly.
+# A Linux host without /dev/kvm (some CI runners) emulates, slowly, and so
+# does FreeBSD, since QEMU has no bhyve (werewolf create --on bhyve has).
+# NetBSD accelerates with NVMM once loaded (modload nvmm): experimental.
 ifeq ($(ARCH),$(HOST_ARCH))
-ACCEL = $(if $(filter Darwin,$(HOST_OS)),hvf,$(if $(wildcard /dev/kvm),kvm,tcg))
+ACCEL = $(if $(filter Darwin,$(HOST_OS)),hvf,$(if $(wildcard /dev/kvm),kvm,$(if $(wildcard /dev/nvmm),nvmm,tcg)))
 CPU = $(if $(filter tcg,$(ACCEL)),max,host)
 VMTYPE = $(if $(filter Darwin,$(HOST_OS)),vz,qemu)
 else
@@ -476,10 +479,10 @@ endef
 # boots, as "update-policy", and lib/network.zig, a config tar's static
 # network, as "network", compiled with them, as ReleaseSafe as it is.
 ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep seal --dep settings \
-	--dep update-policy --dep network -Mroot=$(1) \
+	--dep update-policy --dep network --dep hostkey -Mroot=$(1) \
 	-Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig -Mverity=lib/verity.zig \
 	-Mseal=lib/seal.zig -Msettings=lib/settings.zig -Mupdate-policy=lib/update-policy.zig \
-	-Mnetwork=lib/network.zig
+	-Mnetwork=lib/network.zig -Mhostkey=lib/hostkey.zig
 
 define zig_build
 $(zig_check)
@@ -512,6 +515,7 @@ test:
 	zig test lib/settings.zig
 	zig test lib/update-policy.zig
 	zig test lib/network.zig
+	zig test lib/hostkey.zig
 	zig test boot/gpt.zig
 	zig test tools/cve-tiers.zig
 	zig test tools/kernel-config-check.zig
@@ -634,7 +638,11 @@ werewolf: $(WEREWOLF)
 $(WEREWOLF): cmd/werewolf/werewolf.zig $(wildcard cmd/werewolf/*.zig) lib/settings.zig lib/update-policy.zig \
 	lib/network.zig
 	$(zig_check)
-	zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$@
+	@# Beside it, then renamed over it: a build while werewolf runs (a
+	@# check rebuilds it) never leaves an empty file, which a shell would run
+	@# as an empty script, exiting 0 having done nothing.
+	zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$@.tmp
+	mv -f $@.tmp $@
 
 disk: $(DISK)
 
@@ -725,9 +733,17 @@ $(OUT)/slot/root.erofs: $(OUT)/rootfs.tar $(OUT)/overlay.tar $(VERITY_BIN)
 	rm $(OUT)/root.tar $(OUT)/root.mtree
 	mkdir -p $(OUT)/verity && $(VERITY_BIN) $@ $(OUT)/verity/verity
 
+# The slot's kernel as Alpine ships it, not $(BUILD)/vmlinuz: on aarch64
+# an EFI zboot image, 10 MB to the raw Image's 36. A UEFI machine's
+# firmware reads it from the disk on every boot, and on GCP the raw one
+# cost 0.55 s more a boot (4.32 s against 3.76 s from reboot to the
+# kernel's start, eight boots on two machines each). systemd-boot runs it
+# and its EFI stub unpacks it; QEMU takes it as it is; GRUB cannot, so
+# bite and the updater give GRUB the Image inside. On x86_64 both are the
+# same bzImage.
 $(OUT)/slot/vmlinuz: $(BUILD)/vmlinuz
 	mkdir -p $(dir $@)
-	cp $< $@
+	cp $(BUILD)/kernel/x/boot/vmlinuz-virt $@
 
 # On the machine to take over: build its slot here and install it with
 # bite -i, which opens a shell in the new root and then offers to reboot
@@ -821,9 +837,10 @@ $(BUILD)/config.tar: $(shell find config/. -type d -o -type f 2>/dev/null)
 QEMU_CONFIG = $(if $(wildcard config),-drive file=$(BUILD)/config.tar$(,)format=raw$(,)if=virtio$(,)readonly=on)
 , := ,
 
+# dd's report goes to /dev/null, since NetBSD's dd has no status=none.
 $(BUILD)/data.img:
 	mkdir -p $(BUILD)
-	dd if=/dev/zero of=$@ bs=1048576 count=0 seek=8192 status=none
+	dd if=/dev/zero of=$@ bs=1048576 count=0 seek=8192 2>/dev/null
 
 # Given EL2, an aarch64 guest's kernel starts its built-in KVM unless told
 # not to (kvm-arm.mode=none), so werewolf boots with EL2 wherever the host
@@ -856,8 +873,9 @@ run-ssh:
 # and runs test/checks on each as root on its console (test/boot). Each
 # machine gets a blank disk and a config disk of its own, and nothing listens
 # on the host, so `make -j check` runs them side by side. The config holds
-# only data.key, a fixed test key, so prod and the forms on it put /data in
-# LUKS2. Builds and
+# data.key, a fixed test key, so prod and the forms on it put /data in
+# LUKS2, and what a form's services need (test/config-FORM writes it: a
+# bastion's key, OpenBao's unseal key, a CA). Builds and
 # consoles are logged in build/<arch>/check/. See docs/testing.md.
 FORMS := $(patsubst forms/%.yaml,%,$(wildcard forms/*.yaml))
 CHECK = $(BUILD)/check$(if $(SEAL_LEARN),-learn)
@@ -865,7 +883,7 @@ CHECK = $(BUILD)/check$(if $(SEAL_LEARN),-learn)
 # shell on the console; the forms that ship without one are also booted as
 # they ship (check-shellfree-%).
 CHECK_MAKE = $(MAKE) --no-print-directory DEV=1
-SHELLFREE_FORMS = minimal prod nginx php node python jre demo webshell-example
+SHELLFREE_FORMS = minimal prod nginx php node python jre demo webshell-example caddy valkey
 SHELLFREE_CHECKS = $(addprefix check-shellfree-,$(SHELLFREE_FORMS))
 # romfile= because direct boot needs no network boot ROM, and CI has none.
 # 1 GB keeps a form's memory honest; demo's grype holds its ~700 MB
@@ -973,7 +991,7 @@ check-%: | $(CHECK_SHARED)
 	@$(CHECK_MAKE) FORM=$* _check-form
 
 _check-form: $(WEREWOLF)
-	@rm -f $(CHECK)/$(FORM).img && dd if=/dev/zero of=$(CHECK)/$(FORM).img bs=1048576 count=0 seek=1024 status=none
+	@rm -f $(CHECK)/$(FORM).img && dd if=/dev/zero of=$(CHECK)/$(FORM).img bs=1048576 count=0 seek=1024 2>/dev/null
 	@rm -rf $(CHECK)/$(FORM)-config && mkdir -p $(CHECK)/$(FORM)-config && \
 		head -c 64 /dev/zero | tr '\0' k >$(CHECK)/$(FORM)-config/data.key && \
 		$(if $(CHECK_SSH),rm -f $(CHECK)/$(FORM)-key $(CHECK)/$(FORM)-key.pub && \
@@ -983,6 +1001,7 @@ _check-form: $(WEREWOLF)
 			cp $(CHECK)/$(FORM)-key.pub $(CHECK)/$(FORM)-config/bastion/authorized_keys &&) \
 		$(if $(filter tailscale,$(FORM)),mkdir -p $(CHECK)/$(FORM)-config/tailscale && \
 			printf '%s\n' tskey-auth-offline-test >$(CHECK)/$(FORM)-config/tailscale/auth_key &&) \
+		$(if $(wildcard test/config-$(FORM)),test/config-$(FORM) $(CHECK)/$(FORM)-config &&) \
 		$(WEREWOLF) pack $(FORM) -o $(CHECK)/$(FORM)-config.tar --config $(CHECK)/$(FORM)-config >/dev/null
 	@awk '$(if $(filter tailscale,$(FORM)),$$2 != "listeners",1)' test/checks $(wildcard test/checks-$(FORM)) >$(CHECK)/$(FORM)-checks
 	@SSH_MODE=$(FORM) SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key test/boot $(FORM) $(CHECK)/$(FORM)-checks $(CHECK)/$(FORM).log $(CHECK_FORM_QEMU)
@@ -1017,7 +1036,7 @@ $(SHELLFREE_CHECKS): check-shellfree-%: | $(CHECK_SHARED)
 	@$(MAKE) --no-print-directory FORM=$* DEV= _check-shellfree-boot
 
 _check-shellfree-boot:
-	@rm -f $(CHECK)/$(FORM)-shellfree.img && dd if=/dev/zero of=$(CHECK)/$(FORM)-shellfree.img bs=1048576 count=0 seek=1024 status=none
+	@rm -f $(CHECK)/$(FORM)-shellfree.img && dd if=/dev/zero of=$(CHECK)/$(FORM)-shellfree.img bs=1048576 count=0 seek=1024 2>/dev/null
 	@test/boot $(FORM)-shellfree $(or $(wildcard test/console-$(FORM)),-) $(CHECK)/$(FORM)-shellfree.log $(CHECK_QEMU) \
 		-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_CMDLINE) werewolf.data=vda" \
 		-drive file=$(CHECK)/$(FORM)-shellfree.img,format=raw,if=virtio
@@ -1139,14 +1158,19 @@ _check-metadata-boots:
 # as a cloud records it, judged against the form as it ships
 # (test/posture-known). -snapshot leaves the published bytes as they are,
 # and a network with no way out keeps the updater from installing the
-# latest release over them.
+# latest release over them. Not on emulated arm64, as for persist: CI's arm
+# runners have no KVM, and edk2 there never reaches systemd-boot in time.
 DIST_DISK_QEMU = qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic \
 	-smp 2 -m 2048 -snapshot -no-reboot $(UEFI_FLAGS) -device virtio-rng-pci \
 	-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile=
 check-dist:
+ifeq ($(ARCH)-$(ACCEL),aarch64-tcg)
+	@echo "skip   dist               emulated arm64 (no EL2): UEFI boot too slow; x86_64 covers it"
+else
 	@failed=0; for f in $(filter-out $(DIST_DIRECT_FORMS),$(RELEASE_FORMS)); do \
 		$(MAKE) --no-print-directory FORM=$$f _check-dist-disk || failed=1; \
 	done; exit $$failed
+endif
 
 _check-dist-disk:
 	@[ -n "$(UEFI_FIRMWARE)" ] || { echo "FAIL   dist-$(FORM)     no UEFI firmware for $(ARCH) (edk2 or OVMF)"; exit 1; }
@@ -1358,7 +1382,7 @@ ci:
 # either way.
 $(BUILD)/disk.img:
 	mkdir -p $(BUILD)
-	dd if=/dev/zero of=$@ bs=1048576 count=64 status=none
+	dd if=/dev/zero of=$@ bs=1048576 count=64 2>/dev/null
 
 $(OUT)/lima.yaml: boot/lima.yaml.in Makefile $(ALLOW_FILES)
 	mkdir -p $(OUT)
