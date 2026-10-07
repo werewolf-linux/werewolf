@@ -1626,6 +1626,12 @@ const Posture = struct {
         if (!exists(p.io, leash_bin)) return;
         var exe: [Dir.max_path_bytes]u8 = undefined;
         const self = exe[0 .. Dir.cwd().readLink(p.io, "/proc/self/exe", &exe) catch return];
+        // Clear any leftover the probe's own directories hold before this
+        // run, not only after: on a kept /data, a boot whose power was cut
+        // mid-probe could leave /data/svc/posture-probe behind, and leash
+        // would then park the probe on it.
+        Dir.cwd().deleteTree(p.io, "/run/svc/" ++ probe_name) catch {};
+        Dir.cwd().deleteTree(p.io, "/data/svc/" ++ probe_name) catch {};
         Dir.cwd().createDirPath(p.io, probe_dir) catch return;
         defer {
             Dir.cwd().deleteTree(p.io, probe_dir) catch {};

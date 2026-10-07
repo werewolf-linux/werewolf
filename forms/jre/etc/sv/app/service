@@ -5,4 +5,5 @@
 exec    /usr/bin/java -XX:-UsePerfData -Djava.io.tmpdir=/run/svc/app -m jdk.httpserver -b 0.0.0.0 -p 8080 -d /usr/lib/app/www
 user    app
 pledge  stdio rpath wpath proc inet listen unix
+memory  1024
 listen  tcp/8080

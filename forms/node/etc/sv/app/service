@@ -3,5 +3,6 @@
 exec    /usr/bin/node /usr/lib/app/server.js
 user    app
 pledge  stdio rpath wpath proc inet listen
+memory  1024
 listen  tcp/8080
 env     NODE_ENV=production

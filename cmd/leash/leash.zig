@@ -40,9 +40,11 @@
 //!     env NAME=VALUE          its environment, otherwise only PATH
 //!     secret NAME PATH        a variable read from a file; never logged
 //!     nofile N                its limit on open files
-//!     memory N                the most address space it may map, in MiB,
-//!                             a ceiling so one service cannot exhaust the
-//!                             machine's memory (RLIMIT_AS)
+//!     memory N                its resident memory ceiling, in MiB: the
+//!                             service's cgroup memory.max, so one service
+//!                             cannot exhaust the machine's memory. A
+//!                             ceiling on memory held, not address space
+//!                             reserved, so the JVM and V8 fit under it.
 //!
 //! Every service also gets /run/svc/NAME and, while /data is usable,
 //! /data/svc/NAME, owned by its user and its working directory; and the
@@ -185,12 +187,29 @@ pub fn main(init: std.process.Init) !void {
             &.{ .cur = n, .max = n },
         )) != .SUCCESS) fail(io, ctl, .park, name, "nofile {d}: refused", .{n});
     }
-    if (s.memory) |mib| {
-        const bytes: u64 = @as(u64, mib) << 20;
-        if (linux.errno(linux.setrlimit(
-            .AS,
-            &.{ .cur = bytes, .max = bytes },
-        )) != .SUCCESS) fail(io, ctl, .park, name, "memory {d}: refused", .{mib});
+    // The service's cgroup (cmd/init made /run/cgroup/svc with memory and
+    // pids delegated): its whole process tree lives here, so `memory` caps
+    // its resident memory -- not its address space, which the JVM and V8
+    // over-reserve -- and its finish reaper kills the tree, detached
+    // children included, when it stops. Joined as root, before the drop, so
+    // the service cannot leave it or raise its own cap. Where cgroup2 is not
+    // available (init said so), the service runs uncapped and unreaped, as
+    // before.
+    if (exists("/run/cgroup/svc")) {
+        const dir = gpa.printSentinel("/run/cgroup/svc/{s}", .{name}, 0) catch unreachable;
+        _ = linux.mkdir(dir, 0o755);
+        if (s.memory) |mib| {
+            var buf: [24]u8 = undefined;
+            const max = std.mem.print(&buf, "{d}\n", .{@as(u64, mib) << 20}) catch unreachable;
+            if (!writeIn(gpa, dir, "memory.max", max))
+                fail(io, ctl, .park, name, "memory {d}: cannot set memory.max", .{mib});
+        }
+        var pid_buf: [24]u8 = undefined;
+        const pid = std.mem.print(&pid_buf, "{d}\n", .{linux.getpid()}) catch unreachable;
+        if (!writeIn(gpa, dir, "cgroup.procs", pid))
+            fail(io, ctl, .park, name, "cannot join its cgroup", .{});
+    } else if (s.memory != null) {
+        record(io, .{ .event = "uncapped", .service = name, .why = "no cgroup2" });
     }
 
     var rules = Ruleset.init() catch |err| fail(
@@ -953,6 +972,17 @@ fn lookupUser(passwd: []const u8, name: []const u8) ?User {
 
 fn readOr(io: Io, gpa: Allocator, path: []const u8) []const u8 {
     return Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch "";
+}
+
+/// Write text to dir/file, which must already exist (a cgroup control
+/// file): opened write-only, no create, no truncate.
+fn writeIn(gpa: Allocator, dir: [:0]const u8, file: []const u8, text: []const u8) bool {
+    const path = gpa.printSentinel("{s}/{s}", .{ dir, file }, 0) catch return false;
+    const fd = linux.open(path, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+    if (linux.errno(fd) != .SUCCESS) return false;
+    defer _ = linux.close(@intCast(fd));
+    const n = linux.write(@intCast(fd), text.ptr, text.len);
+    return linux.errno(n) == .SUCCESS and n == text.len;
 }
 
 fn exists(path: [:0]const u8) bool {

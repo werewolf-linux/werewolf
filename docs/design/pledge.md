@@ -213,6 +213,36 @@ service needs, in the words its service file would use.
    promises), and system calls (System calls: promises), with the seal
    following them.
 
+## Service lifecycle: a cgroup each
+
+A pledge and a leash bound what a service *does*; a cgroup bounds what it
+*leaves behind*. A compromised service can `fork`, `setsid` and `exec` the
+one program it is allowed, leaving a daemon that reparents to PID 1 and
+outlives the request -- a backdoor, confined but alive, that a bare runit
+would not reap, since runsv signals only the process it supervises.
+
+So each leashed service is its own cgroup. init mounts cgroup2 at
+`/run/cgroup` -- under `/run`, not `/sys`, because fence keeps `/sys`
+read-only machine-wide, and leash and the reaper must write cgroup files
+from inside that domain, where only `/run` is writable -- and delegates
+`memory` and `pids` to a `svc` subtree. leash, as root before it drops,
+makes `/run/cgroup/svc/NAME`, sets `memory.max` from the service file's
+`memory`, and joins; the service and everything it forks, detached
+children included, stay in that cgroup, and a dropped service cannot leave
+it (its Landlock grants only `/run/svc/NAME`). When runsv stops the
+service -- `sv down`, a crash, a restart, shutdown -- it runs the
+service's `finish`, `leash-reap`, which writes `cgroup.kill`: the kernel
+kills the whole tree at once. So a detached backdoor dies with the service
+that spawned it, not only at the next reboot.
+
+`memory.max` caps resident memory, not address space, so it binds the JVM
+and V8 (which reserve virtual space eagerly) as well as an interpreter --
+unlike `RLIMIT_AS`, which a VM's reservations blow past. A per-service PID
+namespace would add little over this: `hidepid` and the per-service uid
+already hide other services from a compromised one, and the cgroup already
+delivers the kill-the-whole-tree guarantee, so werewolf keeps the one
+mechanism, not two.
+
 ## Not covered
 
 - **Scripts and memory.** Landlock judges `execve`, not an interpreter

@@ -14,9 +14,10 @@ why there are so few.
 | --- | --- | --- |
 | `minimal` | | boots anywhere, from the initramfs, its own disk or a slot bite installed; a static address; listens on nothing |
 | `prod` | `minimal` | the production base: DHCP, the cloud's metadata, updates itself, `/data` on a disk, in LUKS2 when the config brings `data.key` ([data.md](data.md)); no shell, nothing listening. Build yours on this, or on a runtime form below |
+| `app` | `prod` | the unprivileged `app` user and group (204); no runtime, service or listener |
 | `nginx` | `prod` | serving a site from the image on :80 |
 | `php` | `nginx` | with php-fpm running the site's `.php` files |
-| `node`, `python`, `jre` | `prod` | running an application on :8080 |
+| `node`, `python`, `jre` | `app` | running an application on :8080 |
 | `postgresql` | `prod` | PostgreSQL 17 on a UNIX socket ([postgresql.md](postgresql.md)) |
 | `demo` | `postgresql` | nginx and the status page ([demo.md](demo.md)) |
 | `prod-ssh` | `prod` | sshd, for people who log in |
@@ -34,6 +35,12 @@ console, for finding out why something does not work. What ships is built
 without it.
 
 ## The runtime forms
+
+`prod` has no `app` user or group. Its descendant `app` adds that account
+with uid/gid 204, home `/var/empty` and shell `/sbin/nologin`. It adds no
+packages, service or listening port. The `node`, `python` and `jre` forms,
+and the Go and Rust examples, inherit it. PHP and nginx keep distinct
+service accounts because they run separate services in the same VM.
 
 `nginx`, `php`, `node`, `python` and `jre` are `prod` and one runtime from
 Wolfi, as Chainguard's images are, each with a site or application of its
@@ -61,6 +68,13 @@ design, as `kernel-no-hypervisor` does on `qemu-host`. `nginx` carries
 none.
 
 ## Your application
+
+For complete runnable tutorials with an image-building Makefile and
+`deploy-qemu` / `deploy-gcp` targets, see [the language examples](../examples/README.md):
+[PHP](../examples/php/README.md), [Python](../examples/python/README.md),
+[Node.js](../examples/nodejs/README.md), [Go](../examples/go/README.md) and
+[Rust](../examples/rust/README.md). Each explains declarative configuration
+and what automatic updates do, including their limits for application code.
 
 An application is built into the image, as Chainguard's are with apko,
 not fetched by the machine: a form of your own includes a runtime form,
@@ -172,7 +186,8 @@ and nothing else. The kernel enforces each limit; nothing asks the program:
 | to write outside `/data/svc/app` and `/run/svc/app` | refused; the root is read-only besides | `write PATH` |
 | to run another program: a shell, `curl` | refused (`pledge exec`, then Landlock); there is no shell in the image anyway | `run PROGRAM` |
 | to read a secret | it has none | `secret NAME PATH`: a variable read from a file in the config |
-| to exhaust the machine's memory | capped where the service sets one | `memory MiB`: a ceiling on its address space (RLIMIT_AS). Suits an interpreter (CPython, PHP); the JVM and V8 reserve virtual space eagerly, so size it well above their heap or leave it off |
+| to exhaust the machine's memory | capped where the service sets one | `memory MiB`: its cgroup `memory.max`, a ceiling on resident memory (not address space), so it fits an interpreter, the JVM and V8 alike |
+| to leave a process running after it is stopped | killed with the service | nothing to add: each leashed service is a cgroup, and its `finish` writes `cgroup.kill` on stop, restart and shutdown, so its whole tree -- a detached backdoor included -- goes with it |
 
 Every service file states a `pledge`; a form built without one is parked at
 boot, so a service always says what it does. `memfd`, `ipc` (System V

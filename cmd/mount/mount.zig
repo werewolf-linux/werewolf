@@ -85,6 +85,9 @@ const filesystems = [_]Fs{
     .{ .name = "proc", .options = &.{"hidepid"} },
     .{ .name = "sysfs" },
     .{ .name = "securityfs" },
+    // The leashed services' cgroup2 hierarchy, under /run (cmd/init); no
+    // options, since init mounts it once and the kernel names its files.
+    .{ .name = "cgroup2" },
     .{ .name = "devtmpfs", .devices = true },
     .{ .name = "devpts", .devices = true },
     .{ .name = "tmpfs", .options = &.{ "mode", "size" } },

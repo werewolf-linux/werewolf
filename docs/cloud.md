@@ -6,6 +6,10 @@ set as the instance's user data. `prod`, and every form on it, asks.
 
 ## Setting it up
 
+For an end-to-end image build and GCP deployment, start with the
+[language tutorials](../examples/README.md). Each includes a form, a Makefile
+for QEMU and GCP, verification commands and cloud resource cleanup.
+
 Make the config tar as for a config disk ([README](../README.md#configure-it)),
 then hand it to the cloud in base64:
 

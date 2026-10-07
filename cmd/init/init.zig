@@ -173,6 +173,33 @@ const Machine = struct {
             "/var/tmp",
         });
         mkdir("/run/config", 0o700);
+        m.cgroups();
+    }
+
+    /// A cgroup2 hierarchy for the leashed services (cmd/leash), under /run
+    /// rather than /sys so fence's domain -- which keeps /sys read-only --
+    /// still lets leash and the finish reaper manage it through the /run it
+    /// may write. memory and pids are delegated to the svc subtree, so a
+    /// service gets a memory ceiling and its whole process tree, detached
+    /// children included, is killed when it stops (its finish writes
+    /// cgroup.kill). Without cgroup2 or its controllers, services still run,
+    /// uncapped and without that reaper.
+    fn cgroups(m: *Machine) void {
+        mkdir("/run/cgroup", 0o755);
+        if (!m.run(&.{
+            mount_bin,
+            "-t",
+            "cgroup2",
+            "-o",
+            "nosuid,nodev,noexec",
+            "cgroup2",
+            "/run/cgroup",
+        })) return say("no cgroup2; services run uncapped and unreaped", .{});
+        if (!writeFile("/run/cgroup/cgroup.subtree_control", "+memory +pids"))
+            return say("cgroup2 without memory/pids; services run uncapped", .{});
+        mkdir("/run/cgroup/svc", 0o755);
+        _ = writeFile("/run/cgroup/svc/cgroup.subtree_control", "+memory +pids");
+        say("cgroups: a memory cap and a reaper per service", .{});
     }
 
     /// What init and the services change of the read-only root lives in

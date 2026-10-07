@@ -38,6 +38,11 @@ ok  slot-commits     ! grep -q werewolf.slot= /proc/cmdline || { i=0; while [ ! 
 ok  cleanup          ! command -v bite-cleanup || ! grep -q werewolf.slot= /proc/cmdline || { bite-cleanup -n | grep -q 'would delete 7 entries' && [ -e /victim/etc/os-release ] && bite-cleanup && [ "$(ls -A /victim | tr '\n' ' ')" = "boot var " ] && [ "$(ls -A /victim/var /victim/var/lib | tr '\n' ' ')" = "/victim/var: lib  /victim/var/lib: werewolf " ] && [ -s /victim/var/lib/werewolf/a/root.erofs ] && [ -s /victim/boot/grub/grubenv ] && [ -d /run/werewolf ]; }
 ok  root-unlinked    ! rm -f /init && [ -e /init ] && awk '$2 == "/" { o = $4 } END { exit o !~ /^ro(,|$)/ }' /proc/mounts
 ok  root-verified    grep -q '^/dev/mapper/root / erofs ro' /proc/mounts && [ "$(cat /sys/block/dm-0/dm/name)" = root ] && ls /sys/block/dm-0/slaves | grep -q '^loop' && [ "$(cat /sys/module/dm_verity/refcnt)" = 1 ]
+# Each leashed service (one with a service file) is in its own cgroup under
+# /run/cgroup/svc, so its whole tree -- a detached backdoor included -- is
+# killed when it stops (its finish writes cgroup.kill). Skipped where the
+# kernel has no cgroup2.
+ok  cgrouped         [ -d /run/cgroup/svc ] || exit 0; for d in /etc/sv/*/; do [ -f "$d/service" ] || continue; n=$(basename "$d"); [ -n "$(cat /run/cgroup/svc/$n/cgroup.procs 2>/dev/null)" ] || { echo "$n not in its cgroup"; exit 1; }; done
 # Last, for the second boot (test/checks-again): a mark on a /data that is
 # kept on a disk.
 ok  data-mark        grep -q ' /data tmpfs ' /proc/mounts || echo kept >/data/.werewolf-check

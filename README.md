@@ -79,6 +79,7 @@ one includes `minimal`. `make list-forms` shows the include chains.
 |---|---|
 | `minimal` | the base: 9 packages, nothing listening |
 | `prod` | DHCP, the cloud's metadata, updates itself, `/data` on a disk (in LUKS2 with `data.key`); no shell, nothing listening. Build yours on this. |
+| `app` | `prod` plus an unprivileged application user and group; no runtime or service |
 | `prod-ssh` | `prod` plus sshd |
 | `nginx`, `php`, `node`, `python`, `jre` | `prod` and one runtime, leashed: bake your site or application into a form on one ([docs/forms.md](docs/forms.md)) |
 | `postgresql`, `demo` | leashed services |
@@ -96,6 +97,7 @@ after a healthy minute. See [docs/bite.md](docs/bite.md).
 
 ## Documentation
 
+- [examples/](examples/README.md): PHP, Python, Node.js, Go and Rust tutorials, with image builds and QEMU/GCP deployment
 - [docs/forms.md](docs/forms.md): the forms, and building your application into one
 - [docs/programs.md](docs/programs.md): the programs in `cmd/` and what confines them in `lib/`
 - [docs/data.md](docs/data.md): `/data`, disks and encryption

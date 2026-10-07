@@ -168,7 +168,7 @@ SEAL_BINS := $(foreach p,$(SEAL_PROGRAMS),$(PROGRAMS)/$(p)/usr/lib/werewolf/$(p)
 # runit's stages, reboot and poweroff, GRUB's environment block, and the
 # slot-keep, power-button, debug-shell and sshd services; and leash, which starts
 # a service someone else wrote. The forms link to them.
-SHELLFREE := runit-stage reboot grub-setenv slot-keep power-button debug-shell sshd-start leash
+SHELLFREE := runit-stage reboot grub-setenv slot-keep power-button debug-shell sshd-start leash leash-reap
 SHELLFREE_BINS := $(foreach p,$(SHELLFREE),$(PROGRAMS)/$(p)/usr/lib/werewolf/$(p))
 UPDATER_BIN := $(if $(filter prod,$(CHAIN)),$(PROGRAMS)/slot-update/usr/lib/werewolf/slot-update)
 STATUS_BIN := $(if $(filter demo,$(CHAIN)),$(PROGRAMS)/status-page/usr/lib/werewolf/status-page)
@@ -278,6 +278,9 @@ LIMA_CONSOLE = $(if $(filter vz,$(VMTYPE)),hvc0,$(CONSOLE))
 	_check-form _check-shellfree-boot _check-slot-boot _check-updater-boot _check-nodata-boot _check-lease-boot _check-unsigned-boot _check-unsigned-slot _check-metadata-boots _dist-form _check-dist-disk _check-gcp
 
 all: image
+
+# Compiled tutorial applications; their toolchains stay on the build host.
+include examples/build.mk
 
 image: $(BUILD)/vmlinuz $(OUT)/initramfs.zst
 
@@ -771,7 +774,17 @@ CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.
 CHECK_SLOT_FORM = minimal
 VICTIM_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec
 
-check: $(addprefix check-,$(FORMS)) $(SHELLFREE_CHECKS) check-slot check-persist check-nodata check-lease check-unsigned check-verity check-metadata
+# The suite splits into groups so CI (.github/workflows/check.yml) runs each
+# as its own job, in parallel, and a failure names the area it is in. Each
+# group is a target of its own: `make check-cloud` runs just those. `make
+# check` runs them all, as before.
+.PHONY: check-forms check-shellfree check-integrity check-cloud
+check-forms:     $(addprefix check-,$(FORMS))
+check-shellfree: $(SHELLFREE_CHECKS)
+check-integrity: check-slot check-unsigned check-verity
+check-cloud:     check-metadata check-nodata check-lease
+
+check: check-forms check-shellfree check-integrity check-cloud check-persist
 	@echo "check: every form, and a slot, passed"
 
 # What the forms' services would need that their pledges do not promise:
@@ -1054,7 +1067,17 @@ PERSIST_QEMU = qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -no
 	-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile= \
 	-drive file=$(CHECK)/persist.img,format=raw,if=virtio
 .PHONY: check-persist _check-persist-boot
+# persist boots through UEFI firmware (edk2/OVMF), the suite's only firmware
+# path. Emulated aarch64 has no EL2, so edk2 + the 2 GB demo run under pure
+# TCG and cannot reach runit in the boot budget; x86_64 (fast enough under
+# TCG), Apple Silicon (HVF) and any KVM host all cover it, and its subject,
+# PostgreSQL surviving a power cut, is architecture-independent. check-slot
+# keeps the bite path on arm by booting a slot direct-kernel, not through
+# firmware. So skip it, loudly, only where it can only ever time out.
 check-persist: | $(CHECK_SHARED) check-demo
+ifeq ($(ARCH)-$(ACCEL),aarch64-tcg)
+	@echo "skip   persist            emulated arm64 (no EL2): UEFI boot too slow; x86_64 covers it"
+else
 	@mkdir -p $(CHECK)
 	@[ -n "$(UEFI_FIRMWARE)" ] || { echo "FAIL   persist            no UEFI firmware for $(ARCH) (edk2 or OVMF)"; exit 1; }
 	@[ "$(ARCH)" = aarch64 ] || [ -n "$(UEFI_VARS)" ] || { echo "FAIL   persist            no UEFI variables template for $(ARCH) (edk2-i386-vars.fd or OVMF_VARS.fd)"; exit 1; }
@@ -1063,6 +1086,7 @@ check-persist: | $(CHECK_SHARED) check-demo
 		DISK_ARGS="console=$(CONSOLE) werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS) $(SEAL_ARGS)" >$(CHECK)/persist-build.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/persist-build.log; echo "FAIL   persist build: see $(CHECK)/persist-build.log"; exit 1; }
 	@$(CHECK_MAKE) FORM=demo _check-persist-boot
+endif
 
 _check-persist-boot:
 	@$(uefi-vars)
