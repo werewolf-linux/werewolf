@@ -1,0 +1,92 @@
+# misp: prod, with MISP's core image, MariaDB and Valkey on loopback.
+# The image starts through bash; this execs that bash on one script, then
+# the image's own entrypoint, which runs supervisord. The published
+# database password, Redis password, GPG passphrase and supervisor
+# password are not used. The administrator's password is the config's.
+# See forms/misp/README.md.
+base: prod
+
+with: [mariadb-tcp, valkey]
+
+# make check's (forms/README.md): PHP's workers beside MariaDB.
+check:
+  memory: 6144
+
+services:
+  # MISP, as _oci-misp, inside its image. misp-run reads the
+  # administrator's password, makes the GPG and supervisor passwords
+  # once, and execs the image's entrypoint. That entrypoint's defaults
+  # (example, redispassword, passphrase, supervisor, admin@admin.test)
+  # do not apply: the variables are already set. It reaches MariaDB,
+  # Valkey, and public addresses on 80 and 443 for feeds. A missing
+  # password, address or email parks it. The image's bash may run what
+  # supervisord starts: nginx, PHP, and the image's own programs.
+  misp:
+    image: ghcr.io/misp/misp-docker/misp-core:v2.5.50
+    exec: /usr/bin/bash /usr/lib/werewolf/misp-run
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/3306 tcp/6379, tcp/443 tcp/80 public, udp/53 tcp/53]
+    write:
+      - /var/www/MISP/app/Config
+      - /var/www/MISP/app/files
+      - /var/www/MISP/app/tmp
+    run:
+      - /bin/bash
+      - /usr/bin/bash
+      - /usr/bin/tini
+      - /bin/
+      - /usr/bin/
+      - /usr/sbin/
+      - /usr/local/bin/
+    config: admin-password /run/config/misp/admin-password
+    setting:
+      - base-url url required as BASE_URL
+      - admin-email string required as ADMIN_EMAIL
+    render: env site
+    memory: 2048
+    nofile: 16384
+    env:
+      - MYSQL_HOST=127.0.0.1
+      - MYSQL_PORT=3306
+      - MYSQL_USER=misp
+      - MYSQL_PASSWORD=misp
+      - MYSQL_DATABASE=misp
+      - REDIS_HOST=127.0.0.1
+      - REDIS_PORT=6379
+      - ENABLE_REDIS_EMPTY_PASSWORD=true
+      - MISP_MODULES_FQDN=http://127.0.0.1:9
+      - ENABLE_BACKGROUND_UPDATES=false
+      - OIDC_ENABLE=false
+      - LDAP_ENABLE=false
+      - DISABLE_CA_REFRESH=true
+
+  # MariaDB, as mariadb-tcp runs it, on loopback. The role misp, from
+  # the SQL, is the only TCP login, and only MISP's leash reaches it.
+  mariadb:
+    exec: /usr/bin/mariadbd --defaults-file=/etc/mariadb/werewolf.cnf
+    before: /usr/lib/werewolf/mariadb-init
+    user: mariadb
+    pledge: stdio rpath wpath unix inet listen proc aio
+    listen: tcp/3306 loopback
+    read: /etc/mariadb /run/werewolf/import
+    share: shared
+    memory: 1024
+    nofile: 16384
+    env:
+      - UMASK=0640
+      - UMASK_DIR=0750
+      - PORT=3306
+
+  # Valkey, on loopback TCP, no password: MISP's image cannot see the
+  # socket, and nothing off this machine can open the port.
+  valkey:
+    exec: /usr/bin/valkey-server /etc/valkey/valkey.conf
+    before: /usr/lib/werewolf/valkey-init
+    user: valkey
+    pledge: stdio rpath wpath inet unix listen proc
+    listen: tcp/6379 loopback
+    read: /etc/valkey /run/werewolf/import
+    share: shared
+    memory: 256
+    nofile: 10240

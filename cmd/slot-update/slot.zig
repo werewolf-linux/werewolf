@@ -207,6 +207,15 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
         work_dir ++ "/slot/stage0.zst",
         work_dir ++ "/stage0.cpio",
     });
+    // A published UKI rides in the slot beside the kernel: the whole slot
+    // as one PE the boot key signed, which firmware with Secure Boot on
+    // boots whole and anything else boots as plainly
+    // (docs/design/verified-boot.md). installEsp's entry names it.
+    if (try r.exists(u, "usr/lib/werewolf/uki/slot.efi")) {
+        const slot_dir = try Dir.cwd().createDirPathOpen(io, work_dir ++ "/slot", .{});
+        defer slot_dir.close(io);
+        try copyOut(u, r, "usr/lib/werewolf/uki/slot.efi", slot_dir, "uki.efi");
+    }
 }
 
 // --- install ----------------------------------------------------------------
@@ -350,11 +359,19 @@ pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
             };
         }
         const opts = options orelse return error.NoOtherSlotEntry;
+        const uki: bool = blk: {
+            Dir.cwd().access(
+                u.io,
+                try u.gpa.print("{s}/werewolf/{s}/uki.efi", .{ esp.path(), u.other }),
+                .{},
+            ) catch break :blk false;
+            break :blk true;
+        };
         const serial = try u.gpa.print(
             "{f}",
             .{policy.Serial{ .secs = @max(nowSecs(u.io), newest + 1) }},
         );
-        const entry = try loaderEntry(u.gpa, u.other, serial, opts);
+        const entry = try loaderEntry(u.gpa, u.other, serial, opts, uki);
         for (names) |name| if (isEntryOf(name, u.other))
             try Dir.cwd().deleteFile(u.io, try u.gpa.print("{s}/{s}", .{ entries, name }));
         try u.writeReplacing(
@@ -424,6 +441,22 @@ fn installEsp(u: *Update, build: []const u8) !void {
             .{},
         );
     }
+    // The slot's signed UKI, when its packages carried one: laid beside the
+    // kernel, and the entry below names it, so firmware with the boot key
+    // verifies the whole boot and firmware without it boots it as plainly.
+    const uki: bool = blk: {
+        Dir.cwd().access(io, work_dir ++ "/slot/uki.efi", .{}) catch break :blk false;
+        break :blk true;
+    };
+    if (uki) {
+        try Dir.cwd().copyFile(
+            work_dir ++ "/slot/uki.efi",
+            Dir.cwd(),
+            try u.gpa.print("{s}/uki.efi", .{kdir}),
+            io,
+            .{},
+        );
+    }
     try rememberDeclaration(u, v, rdir);
     linux.sync();
 
@@ -447,7 +480,7 @@ fn installEsp(u: *Update, build: []const u8) !void {
         try u.slotCmdline(),
         u.other,
     );
-    const entry = try loaderEntry(u.gpa, u.other, version, options);
+    const entry = try loaderEntry(u.gpa, u.other, version, options, uki);
     const tmp = try u.gpa.print("{s}/werewolf-{s}.tmp", .{ entries, u.other });
     try u.write(tmp, entry);
     // Arm, then write attempt, as install does and for the same reason.
@@ -1357,7 +1390,16 @@ fn loaderEntry(
     slot: []const u8,
     version: []const u8,
     options: []const u8,
+    uki: bool,
 ) ![]const u8 {
+    if (uki) return gpa.print(
+        \\title werewolf {s}
+        \\sort-key werewolf
+        \\version {s}
+        \\efi /werewolf/{s}/uki.efi
+        \\options {s}
+        \\
+    , .{ slot, version, slot, options });
     return gpa.print(
         \\title werewolf {s}
         \\sort-key werewolf
@@ -1578,7 +1620,17 @@ test "systemd-boot entries" {
         \\initrd /werewolf/b/stage0.zst
         \\options x werewolf.slot=b
         \\
-    , try loaderEntry(a, "b", "20261006T120000Z", "x werewolf.slot=b"));
+    , try loaderEntry(a, "b", "20261006T120000Z", "x werewolf.slot=b", false));
+    // A slot whose packages carried a UKI boots it: one signed PE, the
+    // entry's options appended to the command line sealed inside it.
+    try testing.expectEqualStrings(
+        \\title werewolf b
+        \\sort-key werewolf
+        \\version 20261006T120000Z
+        \\efi /werewolf/b/uki.efi
+        \\options x werewolf.slot=b
+        \\
+    , try loaderEntry(a, "b", "20261006T120000Z", "x werewolf.slot=b", true));
     // entrySecs reads back versions a new entry must beat (howl's first
     // disk's, a leap day); versions in other formats count as none.
     for ([_]i64{ 0, 315532800, 1835481599, 1835481600, 1791288000 }) |secs| {

@@ -1,0 +1,94 @@
+# iris: prod, with DFIR-IRIS behind Caddy, and PostgreSQL on loopback.
+# The image's command is python3; this runs the image's bash, an ELF, on
+# one script that starts gunicorn on loopback. The administrator's
+# password is the config's. Nobody signs up. See forms/iris/README.md.
+base: prod
+
+with: [postgresql, caddy]
+
+# Taken back of werewolf's defaults (lib/allow.zig): PostgreSQL compiles
+# costly queries to machine code with LLVM (jit = on, its default).
+allow: [jit]
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  kernel-write-xor-execute: PostgreSQL compiles costly queries to machine code with LLVM (allow jit, from postgresql)
+
+# make check's (forms/README.md): gunicorn beside PostgreSQL.
+check:
+  memory: 2048
+
+services:
+  # DFIR-IRIS, as _oci-iris, inside its image. iris-run generates the
+  # secret key once, reads the administrator's password, and execs
+  # gunicorn on loopback. It reaches PostgreSQL and nothing else. A
+  # missing password parks it before it serves. Background jobs are not
+  # started: there is no worker beside the web server.
+  iris:
+    image: ghcr.io/dfir-iris/iriswebapp_app:v2.4.29
+    exec: /usr/bin/bash /usr/lib/werewolf/iris-run
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec
+    listen: tcp/8000 loopback
+    connect: [tcp/5432]
+    run:
+      - /usr/bin/bash
+      - /usr/local/bin/python3.9
+    config: admin-password /run/config/iris/admin-password
+    memory: 1024
+    nofile: 16384
+    env:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONPATH=/opt/venv/lib/python3.9/site-packages
+      - POSTGRES_USER=iris
+      - POSTGRES_PASSWORD=iris
+      - POSTGRES_ADMIN_USER=iris
+      - POSTGRES_ADMIN_PASSWORD=iris
+      - POSTGRES_SERVER=127.0.0.1
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=postgres
+      - IRIS_ADM_USERNAME=administrator
+      - IRIS_ADM_EMAIL=admin@localhost
+      - IRIS_AUTHENTICATION_TYPE=local
+      - IRIS_AUTHENTICATION_CREATE_USER_IF_NOT_EXIST=False
+      - DEVELOPMENT_IS_DEV_INSTANCE=False
+      - CELERY_BROKER=sqla+postgresql://iris:iris@127.0.0.1:5432/postgres
+      - IRIS_UPLOADED_PATH=/data/downloads
+      - IRIS_TEMPLATES_PATH=/data/templates
+      - IRIS_BACKUP_PATH=/data/backup
+      - IRIS_ASSET_STORE_PATH=/data/assets
+      - IRIS_DATASTORE_PATH=/data/datastore
+
+  # PostgreSQL, as postgresql's form runs it, but also on loopback TCP:
+  # pg_hba.conf lets the role iris alone in that way, to the postgres
+  # database, and only services whose leash lets them connect to :5432
+  # reach it at all.
+  postgres:
+    exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses=127.0.0.1 -c unix_socket_directories=/run/svc/postgres -c hba_file=/usr/share/werewolf-iris/pg_hba.conf
+    before: /usr/lib/werewolf/pg-init
+    user: postgres
+    pledge: stdio rpath wpath inet proc ipc unix listen connect
+    listen: [tcp/5432 loopback]
+    run: /usr/bin/initdb
+    read: /run/werewolf/import
+    share: shared
+
+  # Caddy, as its own user, for IRIS. The domain is the site.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8000]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

@@ -1,0 +1,5 @@
+# gvm-link: the sockets, on the host. gsad's image sees the listen path
+# as /run/manager.sock. gvmd's image creates the dial path as
+# /run/gvmd.sock. See forms/greenbone/cmd/gvm-link/gvm-link.zig.
+listen /run/svc/gsad/run/manager.sock
+dial /run/svc/gvmd/run/gvmd.sock
