@@ -1,0 +1,10 @@
+#!/bin/sh
+# forms/continuwuity/test/config DIR: the continuwuity form's config for
+# make check. The server name is localhost, which Caddy's own CA signs,
+# and the administrator is alice.
+set -eu
+mkdir -p "$1/continuwuity" "$1/caddy"
+umask 077
+printf '%s' werewolf-check-pass-1 >"$1/continuwuity/admin-password"
+echo '{"domain":"localhost","admin":"alice"}' >"$1/continuwuity/settings.json"
+echo '{"domain":"localhost"}' >"$1/caddy/settings.json"

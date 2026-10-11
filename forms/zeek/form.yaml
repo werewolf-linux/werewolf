@@ -1,0 +1,42 @@
+# zeek: prod, with Zeek reading a packet feed and writing JSON logs to
+# /data. span (cmd/span) opens the interface, then becomes _span and may
+# only copy frames; Zeek, from its project's image, never holds
+# CAP_NET_RAW or CAP_NET_ADMIN. It loads the stock local scripts and
+# reaches a resolver only. See forms/zeek/README.md.
+base: prod
+
+# Taken back of werewolf's defaults (lib/allow.zig): span opens a packet
+# socket and sets promiscuous mode, then drops both.
+allow: [packet, netadmin]
+
+programs: [span]
+
+accounts:
+  groups:
+    - groupname: _span
+      gid: 70
+  users:
+    - username: _span
+      uid: 70
+      gid: 70
+      homedir: /var/empty
+      shell: /sbin/nologin
+
+# make check's (forms/README.md): Zeek's own beside the machine's.
+check:
+  memory: 2048
+
+services:
+  # Zeek, as _oci-zeek, inside its image. /tmp there is /run/svc/zeek here,
+  # where span's fifo is; /data is /data/svc/zeek. It writes logs and
+  # reaches a resolver. It runs nothing else.
+  zeek:
+    image: docker.io/zeek/zeek:8.2
+    exec: /usr/local/zeek/bin/zeek -C -r /tmp/feed local LogAscii::use_json=T Log::default_logdir=/data
+    pledge: stdio rpath wpath inet unix netlink connect proc
+    connect: [udp/53 tcp/53]
+    memory: 1024
+    env:
+      - ZEEKPATH=/usr/local/zeek/share/zeek:/usr/local/zeek/share/zeek/policy:/usr/local/zeek/share/zeek/site
+      - PATH=/usr/local/zeek/bin:/usr/bin
+      - LD_LIBRARY_PATH=/usr/local/zeek/lib

@@ -1,10 +1,12 @@
-# Immich
+# Immich - Hardened VM
 
 A photo and video library, with the phone apps: [Immich](https://immich.app) 3, from the image the project publishes, with PostgreSQL, Valkey and Caddy. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+
+### Weaknesses
 
 - Node and PostgreSQL may compile as they run. Named in `form.yaml`. The image's shell is not started.
 
@@ -32,7 +34,7 @@ howl create immich --with immich --on gcp --allow-from me \
 
 Sign in at `https://photos.example.com`. The library, thumbnails and nightly database dumps are in `/data/svc/immich`.
 
-### Migrating data in
+### Importing data
 
 PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once, in the `postgres` database, while the cluster is first made. See [postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. The same directory may hold `dump.rdb` for Valkey. A cloud cannot attach the disk.
 
@@ -52,4 +54,5 @@ Files the application stores itself are not on that disk. Bring those through th
 
 ### Network Exposure
 
-- tcp/80 and tcp/443, Caddy. Immich, PostgreSQL and Valkey are on loopback. Nothing is fetched for a user.
+- listen: tcp/80 *
+- listen: tcp/443 *

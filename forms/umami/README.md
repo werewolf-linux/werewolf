@@ -1,10 +1,12 @@
-# Umami
+# Umami - Hardened VM
 
 Web analytics without cookies: [Umami](https://umami.is) 3.4, with PostgreSQL and Caddy. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+
+### Weaknesses
 
 - Node and PostgreSQL may compile as they run. Named in `form.yaml`.
 
@@ -34,7 +36,7 @@ howl create umami --with umami --on gcp --allow-from me \
 
 Sign in at `https://stats.example.com`, add a site, and put the script Umami shows you on its pages. The tracker and the collector are public. Statistics are not.
 
-### Migrating data in
+### Importing data
 
 PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once, in the `postgres` database, while the cluster is first made. See [postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. A cloud cannot attach the disk.
 
@@ -53,4 +55,5 @@ Files the application stores itself are not on that disk. Bring those through th
 
 ### Network Exposure
 
-- tcp/80 and tcp/443, Caddy. Umami and PostgreSQL are on loopback. Nothing else leaves the machine.
+- listen: tcp/80 *
+- listen: tcp/443 *

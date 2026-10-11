@@ -4,7 +4,9 @@ A machine that serves hostnames on the Internet with no port open to it: [cloudf
 
 ## Security Posture
 
-cloudflared runs as its own user. There is no shell. Landlock and seccomp hold it to Cloudflare's edge and to the origins its tunnel names. The root is read-only. Nothing listens on the network.
+- cloudflared runs as its own user. There is no shell. The root is read-only.
+- It may reach Cloudflare's edge and the origins its tunnel names.
+- Nothing listens on the network.
 
 ## Getting Started
 
@@ -26,7 +28,7 @@ howl create cloudflared --with cloudflared --on gcp --allow-from me --tunnel-tok
 
 `--allow-from` opens no port: there is no listener. The tunnel connects out.
 
-### Migrating data in
+### Importing data
 
 This machine starts empty. The tunnel's hostnames live in the Cloudflare dashboard, with the token. There is no database to import.
 

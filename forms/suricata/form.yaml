@@ -1,0 +1,50 @@
+# suricata: prod, with Suricata reading a packet feed and writing its
+# alerts to /data. span (cmd/span) opens the interface, then becomes _span
+# and may only copy frames; Suricata never holds CAP_NET_RAW or
+# CAP_NET_ADMIN. No rules are fetched, the unix control socket is off, and
+# nothing listens. See forms/suricata/README.md.
+base: prod
+
+packages:
+  - suricata
+
+# Taken back of werewolf's defaults (lib/allow.zig): span opens a packet
+# socket and sets promiscuous mode, then drops both.
+allow: [packet, netadmin]
+
+programs: [span]
+
+# python and suricata-update, which the package depends on and nothing
+# runs: rules are the image's.
+prune:
+  - usr/bin/python3.13
+  - usr/bin/python3
+  - usr/bin/python
+  - usr/bin/suricata-update
+
+accounts:
+  groups:
+    - groupname: _span
+      gid: 70
+  users:
+    - username: _span
+      uid: 70
+      gid: 70
+      homedir: /var/empty
+      shell: /sbin/nologin
+
+# make check's (forms/README.md): Suricata's own beside the machine's.
+check:
+  memory: 1024
+
+services:
+  # Suricata, as its own user: it reads the fifo span writes, the rules in
+  # the image, and writes logs under /data/svc/suricata. It binds nothing
+  # and reaches nothing. The unix command socket is off, so nothing on the
+  # machine can tell a running Suricata to reload or stop.
+  suricata:
+    exec: /usr/bin/suricata -c /etc/suricata/suricata.yaml -r /run/svc/suricata/feed -l /data/svc/suricata --pidfile /run/svc/suricata/suricata.pid --set default-log-dir=/data/svc/suricata --set unix-command.enabled=no --set default-rule-path=/usr/share/suricata/rules --set rule-files.0=werewolf.rules --set pcap-file.checksum-checks=no --init-errors-fatal
+    user: suricata
+    pledge: stdio rpath wpath unix proc
+    read: [/etc/suricata, /usr/share/suricata]
+    memory: 512

@@ -1,0 +1,6 @@
+#!/bin/sh
+# forms/samba/test/config DIR: two users, alice and bob, for make check.
+set -eu
+mkdir -p "$1/samba"
+umask 077
+printf '%s\n' 'alice:werewolf-check-password' 'bob:werewolf-other-password' >"$1/samba/users"

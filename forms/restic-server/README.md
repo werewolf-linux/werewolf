@@ -1,10 +1,10 @@
-# restic-server
+# restic-server - Hardened VM
 
 A place restic sends backups: [rest-server](https://github.com/restic/rest-server), append-only, from restic's own image, behind Caddy. Each user can see only the repository of their own name, and cannot delete a snapshot. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -39,7 +39,7 @@ howl create restic-server --with restic-server --on gcp --allow-from me \
 
 Point the name at the machine. Add a line and run create again to add a user. Repositories already on `/data` stay. Forget and prune are done by a restic that is allowed to, which this server is not.
 
-### Migrating data in
+### Importing data
 
 This machine starts empty. Point restic at the address howl prints. There is no repository to copy in.
 
@@ -52,4 +52,5 @@ This machine starts empty. Point restic at the address howl prints. There is no 
 
 ### Network Exposure
 
-- tcp/80 and tcp/443, Caddy. rest-server is on loopback.
+- listen: tcp/80 *
+- listen: tcp/443 *

@@ -32,7 +32,7 @@ howl create valkey-tcp --with valkey-tcp --on gcp --allow-from me \
 
 `--allow-from me` admits your address to port 6379. `--maxmemory` is mebibytes. `--maxmemory 0` removes the cap. A form that must also keep a cgroup cap restates this service with `memory:` set above that number. The cgroup is in the image, so it cannot follow the flag.
 
-### Migrating data in
+### Importing data
 
 `--import` copies `dump.rdb` once, before the first start. Take it from the old server with `valkey-cli --rdb dump.rdb`. The password and the cap are the same flags as a fresh install.
 
@@ -52,4 +52,4 @@ A cloud cannot attach the disk. Import where a second disk can be attached, then
 
 ### Network Exposure
 
-tcp/6379
+- listen: tcp/6379 *

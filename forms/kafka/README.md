@@ -1,10 +1,12 @@
-# Kafka
+# Kafka - Hardened VM
 
 An event stream for applications inside a company: [Apache Kafka](https://kafka.apache.org) 4.3 as one KRaft node. Clients use TLS and SCRAM-SHA-512. What no ACL allows is denied. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+
+### Weaknesses
 
 - Java runs Kafka, and the JVM compiles it as it runs. Both are named in `form.yaml`.
 
@@ -43,7 +45,7 @@ howl create kafka --with kafka --on gcp --allow-from me --config config \
 
 From a machine that has Kafka's tools, `ops` creates a topic and grants `orders` that topic alone. Passwords are 12 to 1024 bytes.
 
-### Migrating data in
+### Importing data
 
 Topics start empty. Producers write to the address howl prints. This form does not import a log.
 
@@ -57,4 +59,4 @@ Topics start empty. Producers write to the address howl prints. This form does n
 
 ### Network Exposure
 
-- tcp/9093, TLS, for clients you allow. The controller listens on loopback.
+- listen: tcp/9093 *

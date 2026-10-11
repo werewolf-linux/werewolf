@@ -1,10 +1,12 @@
-# Open WebUI
+# Open WebUI - Hardened VM
 
 A chat window for models that run on the same machine: [Open WebUI](https://github.com/open-webui/open-webui), with Ollama, PostgreSQL and Caddy. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+
+### Weaknesses
 
 - Python runs Open WebUI. Named in `form.yaml`. A function an administrator uploads runs as that same user.
 
@@ -32,7 +34,7 @@ howl create open-webui --with open-webui --on gcp --allow-from me \
 
 Sign in at `https://chat.example.com`. There is no sign-up. You add users. Change the password in Open WebUI afterwards.
 
-### Migrating data in
+### Importing data
 
 PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once, in the `postgres` database, while the cluster is first made. See [postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. A cloud cannot attach the disk.
 
@@ -51,4 +53,5 @@ Files the application stores itself are not on that disk. Bring those through th
 
 ### Network Exposure
 
-- tcp/80 and tcp/443, Caddy. Open WebUI and Ollama are on loopback. Ollama may fetch a model you asked for, over HTTPS.
+- listen: tcp/80 *
+- listen: tcp/443 *

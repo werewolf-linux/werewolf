@@ -147,6 +147,7 @@ program_bin = $(PROGRAMS)/$(1)/$(or $(PROGRAM_AT_$(1)),usr/lib/werewolf/$(1))
 PROGRAM_AT_init = init
 PROGRAM_AT_bite-cleanup = usr/bin/bite-cleanup
 PROGRAM_AT_popen-shim = usr/lib/werewolf/popen-shim.so
+PROGRAM_AT_samba-passwd = usr/lib/werewolf/samba-passwd.so
 form_bin = $(PROGRAMS)/forms/$(notdir $(patsubst %/cmd/$(notdir $(1)),%,$(1)))/usr/lib/werewolf/$(notdir $(1))
 FORM_CMDS := $(sort $(patsubst %/,%,$(wildcard forms/*/cmd/*/) $(foreach d,$(FORM_DIRS),$(wildcard $(d)/cmd/*/))))
 POSTURE_BIN = $(call program_bin,posture)
@@ -175,10 +176,14 @@ $(2): $(or $(3),cmd/$(1))/$(1).zig $$(wildcard $(or $(3),cmd/$(1))/*.zig) $$(wil
 	$$(zig_check)
 	zig build-exe -O ReleaseSafe -fstrip -target $$(ARCH)-linux-musl $$(call ZIG_MODULES,$$<) -femit-bin=$$@
 endef
-$(foreach p,$(filter-out popen-shim,$(CMDS)),$(eval $(call program,$(p),$(call program_bin,$(p)))))
+$(foreach p,$(filter-out popen-shim samba-passwd,$(CMDS)),$(eval $(call program,$(p),$(call program_bin,$(p)))))
 $(foreach c,$(FORM_CMDS),$(eval $(call program,$(notdir $(c)),$(call form_bin,$(c)),$(c))))
 # pg-init preloads popen-shim.so into initdb, so it links glibc as initdb does.
+# samba preloads samba-passwd.so into smbd, for the same reason: glibc.
 $(call program_bin,popen-shim): cmd/popen-shim/popen-shim.zig
+	$(zig_check)
+	zig build-lib -dynamic -O ReleaseSafe -fstrip -target $(ARCH)-linux-gnu -lc -femit-bin=$@ $<
+$(call program_bin,samba-passwd): cmd/samba-passwd/samba-passwd.zig
 	$(zig_check)
 	zig build-lib -dynamic -O ReleaseSafe -fstrip -target $(ARCH)-linux-gnu -lc -femit-bin=$@ $<
 
@@ -194,6 +199,25 @@ UKI_BIN = build/host/uki
 $(UKI_BIN): tools/uki.zig
 	$(zig_check)
 	zig build-exe -O ReleaseSafe -Mroot=$< -femit-bin=$@
+
+# A release's UKI: kernel, stage0, root and command line as one PE the boot
+# key signs (tools/uki; docs/design/verified-boot.md, docs/releases.md).
+# Built when WEREWOLF_BOOT_KEY and WEREWOLF_BOOT_CRT name the key and its
+# certificate, and UKI_STUB names systemd's linuxaa64.efi.stub.
+UKI_STUB ?=
+UKI = $(OUT)/slot/uki.efi
+UKI_WORK = $(BUILD)/uki
+$(UKI): $(OUT)/slot/root.erofs $(OUT)/slot/stage0.zst $(OUT)/slot/cmdline $(BUILD)/vmlinuz $(UKI_BIN)
+	@[ -n "$(WEREWOLF_BOOT_KEY)" ] && [ -n "$(WEREWOLF_BOOT_CRT)" ] && [ -f "$(UKI_STUB)" ] || \
+		{ echo "$@: WEREWOLF_BOOT_KEY, WEREWOLF_BOOT_CRT and UKI_STUB (= systemd's linuxaa64.efi.stub) name the boot key and the stub (docs/testing.md)" >&2; exit 1; }
+	@mkdir -p $(UKI_WORK) && cp $(OUT)/slot/root.erofs $(UKI_WORK)/
+	@cd $(UKI_WORK) && $(TAR) -cf - --format newc --uid 0 --gid 0 --numeric-owner root.erofs | zstd -1 -q -c >root.cpio.zst
+	@cat $(OUT)/slot/stage0.zst $(UKI_WORK)/root.cpio.zst >$(UKI_WORK)/initrd
+	@printf '%s console=%s\0' "$$(cat $(OUT)/slot/cmdline)" $(CONSOLE) >$(UKI_WORK)/cmdline
+	@rm -f $(UKI).signed
+	$(UKI_BIN) $(UKI_STUB) $(UKI).unsigned .linux=$(BUILD)/vmlinuz .initrd=$(UKI_WORK)/initrd .cmdline=$(UKI_WORK)/cmdline
+	osslsigncode sign -certs $(WEREWOLF_BOOT_CRT) -key $(WEREWOLF_BOOT_KEY) -in $(UKI).unsigned -out $(UKI) >/dev/null
+	@rm -f $(UKI).unsigned
 
 # Built under a temporary name, so a running check never finds an empty howl, which sh runs as a pass.
 howl: $(HOWL)
@@ -466,7 +490,16 @@ check-deadman: | _check-shared check-minimal check-slot
 check-unsigned: | _check-shared check-minimal check-slot
 	@$(CHECK_MAKE) FORM=minimal _check-unsigned
 check-secureboot: $(UKI_BIN) | _check-shared check-minimal check-slot
-	@$(CHECK_MAKE) FORM=minimal _check-secureboot
+	@[ -n "$(SECUREBOOT_DIR)" ] || { echo "skip   secureboot        no SECUREBOOT_DIR (docs/testing.md)"; exit 0; }
+	@rm -f $(CHECK)/sb.key $(CHECK)/sb.crt
+	@mkdir -p $(CHECK)
+	openssl req -newkey rsa:2048 -nodes -keyout $(CHECK)/sb.key -x509 -new \
+		-subj /CN=werewolf-secureboot-check -days 30 -out $(CHECK)/sb.crt 2>/dev/null
+	@rm -f $(BUILD)/prod/slot/uki.efi
+	@$(MAKE) --no-print-directory FORM=prod ARCH=$(ARCH) WEREWOLF_BOOT_KEY=$(CHECK)/sb.key \
+		WEREWOLF_BOOT_CRT=$(CHECK)/sb.crt UKI_STUB=$(SECUREBOOT_DIR)/stub.efi \
+		$(BUILD)/prod/slot/uki.efi
+	@$(MAKE) --no-print-directory FORM=prod ARCH=$(ARCH) _check-secureboot
 # check-firecracker builds for x86_64 here and boots on FIRECRACKER_HOST
 # (default galadriel) through a cross-compiled howl, so the host needs no
 # toolchain (docs/testing.md). The form is sshd relaxed to take a key file,
@@ -487,7 +520,8 @@ check-firecracker: | _check-shared
 _check-lease _check-nodata _check-static _check-verity _check-slot _check-deadman _check-unsigned: $(HOWL)
 	@$(CHECK_ENV) test/$(@:_%=%) $(CHECK_QEMU)
 _check-secureboot: $(HOWL)
-	@$(CHECK_ENV) SECUREBOOT_DIR=$(SECUREBOOT_DIR) test/check-secureboot \
+	@$(CHECK_ENV) ARCH=$(ARCH) SECUREBOOT_DIR=$(SECUREBOOT_DIR) \
+		BOOT_KEY=$(CHECK)/sb.key BOOT_CRT=$(CHECK)/sb.crt test/check-secureboot \
 		qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic -smp 2 \
 		-m $(CHECK_MEMORY) -no-reboot
 _check-metadata:

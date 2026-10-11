@@ -1,14 +1,12 @@
-# Prometheus
+# Prometheus - Hardened VM
 
-The `prometheus` form scrapes the targets you name, and itself, every 30
-seconds and keeps 15 days of metrics on `/data`: Prometheus 3.12, on one
-leash, its web and API taking one user, its admin, lifecycle and
-remote-write APIs off, as Prometheus ships
-([design/forms-catalog.md](../../docs/design/forms-catalog.md)).
+[Prometheus](https://prometheus.io) scrapes targets you name and serves its own UI. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- Prometheus runs as its own user. The root is read-only. The TSDB is on `/data`.
+- The admin password is a file. It is not a flag.
+- Targets are addresses you pass. The form does not discover a network.
 
 ## Getting Started
 
@@ -20,7 +18,7 @@ howl create prometheus --with prometheus --targets 127.0.0.1:9090 \
 	--admin grafana --admin-password metrics-password
 ```
 
-Prometheus answers at `http://ADDRESS:9090` as `grafana`, with that password. Targets are names or IPv4 addresses on port 80, 443, 8080, 9090 or 9100, scraped at `/metrics`.
+Open `http://ADDRESS:9090` and sign in as `grafana`. Queries are in [Prometheus's documentation](https://prometheus.io/docs/prometheus/latest/querying/basics/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -30,81 +28,17 @@ howl create prometheus --with prometheus --on gcp --allow-from me \
 	--targets 10.0.0.5:9100 --admin grafana --admin-password metrics-password
 ```
 
-`--allow-from me` admits your address to port 9090. Add `--tls-cert FILE --tls-key FILE` for HTTPS. Metrics are kept 15 days.
+`--allow-from me` admits your address to port 9090. Name each target `HOST:PORT`. Several are a comma-separated list.
 
-### Migrating data in
+### Importing data
 
-This machine starts empty and scrapes from here on. The old history stays where it is. There is no copy of it into `/data`.
+This machine starts empty. History stays on the old server. There is no TSDB import.
+
+### Known Quirks
+
+- `--admin` is the user name. The password file is `--admin-password`.
+- A target on this machine is `127.0.0.1:PORT`. A target elsewhere is that host's address.
 
 ### Network Exposure
 
-tcp/9090
-
-
-## Run your own
-
-```sh
-openssl rand -base64 24 >metrics-password    # its user's; keep it
-howl create metrics --with prometheus --on gcp --allow-from 10.128.0.0/20 \
-	--targets 10.128.0.5:9100,10.128.0.6:8080 \
-	--admin grafana --admin-password metrics-password
-```
-
-Prometheus answers on :9090, at `http://ADDRESS:9090`, to `grafana` and
-that password alone, in the browser or as Grafana's data source with
-basic auth. With `--tls-cert FILE --tls-key FILE` it answers over HTTPS.
-
-| Flag | |
-| --- | --- |
-| `--targets HOST:PORT,...` | required. Up to 256, by name or IPv4 address, on port 80, 443, 8080, 9090 or 9100, scraped at `/metrics` over HTTP |
-| `--admin NAME` | required. The one user its web and API take |
-| `--admin-password FILE` | required. That user's password, 12 to 72 bytes |
-| `--tls-cert FILE`, `--tls-key FILE` | a certificate and its key, PEM: HTTPS on :9090 |
-
-To change a running machine's targets, run its create line again: howl
-replaces its config and restarts it, and the metrics on `/data` stay.
-
-## Ports
-
-fence lets Prometheus reach targets on 80, 443, 8080, 9090 and 9100
-alone: applications' `/metrics`, other Prometheus servers, and
-node_exporter's port. prometheus-setup refuses a target on any other,
-saying so, rather than let fence drop its scrapes. For another port, make
-a form of your own on `base: prometheus` whose `prometheus` service
-connects to it.
-
-## How it is held
-
-- **prometheus-setup first.** [cmd/prometheus-setup](cmd/prometheus-setup/prometheus-setup.zig)
-  runs before Prometheus, on its leash: it writes `prometheus.yml` and
-  `web.yml` in `/run/svc/prometheus` from the settings, the password as
-  a bcrypt hash, refuses a port fence would drop, and has `promtool`
-  check both files before Prometheus starts.
-- **One user.** Every page and API call asks for it, `/-/healthy` too.
-- **Its APIs off.** No admin API (deleting series, snapshots), no
-  lifecycle API (reload, quit), no remote-write or OTLP receiver: nothing
-  but scrapes writes metrics in, and nothing over HTTP changes it.
-- **It runs nothing.** Its pledge has no exec; `promtool` is
-  prometheus-setup's alone.
-- **Itself, scraped.** A job `prometheus` scrapes its own `/metrics` with
-  its own user, so `up` shows a broken scrape before a dashboard does.
-- **Its own limits.** 1 GiB under leash, Go's heap held to 768 MiB.
-
-## Drawbacks
-
-- Scrapes are plain HTTP, without authentication, as most exporters
-  serve; keep them on a private network.
-- No rules or alerting: Prometheus records, Grafana or Alertmanager
-  elsewhere alert.
-- 15 days, on the machine's disk; no remote storage.
-
-## Checked
-
-`make check-prometheus` boots it with its test config ([test/config](test/config)):
-a stranger gets 401 and its user its health; within a scrape or two
-it is up itself and the target nothing answers is down; the admin,
-lifecycle and remote-write APIs each refuse its user with their own
-message; `web.yml` holds a bcrypt hash and not the password, 0600; the
-metrics are on `/data`. `make check-shellfree-prometheus` boots it as it
-ships, with no config: Prometheus parks, saying it has no password,
-before it writes or binds anything.
+- listen: tcp/9090 *

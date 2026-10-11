@@ -197,16 +197,27 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
         .{ .name = "vmlinuz", .path = try gpa.print("{s}/vmlinuz", .{p.build}) },
         .{ .name = "initramfs.zst", .path = try gpa.print("{s}/initramfs.zst", .{p.out}) },
         .{ .name = "cmdline", .path = try gpa.print("{s}/slot/cmdline", .{p.out}) },
-    } else &.{
-        .{ .name = "vmlinuz", .path = try gpa.print("{s}/slot/vmlinuz", .{p.out}) },
-        .{ .name = "stage0.zst", .path = try gpa.print("{s}/slot/stage0.zst", .{p.out}) },
-        .{
-            .name = "stage0-bitten.zst",
-            .path = try gpa.print("{s}/slot/stage0-bitten.zst", .{p.out}),
-        },
-        .{ .name = "root.erofs", .path = try gpa.print("{s}/slot/root.erofs", .{p.out}) },
-        .{ .name = "cmdline", .path = try gpa.print("{s}/slot/cmdline", .{p.out}) },
-        .{ .name = "disk.qcow2", .path = try gpa.print("{s}/disk.qcow2", .{p.out}) },
+    } else blk: {
+        // The signed UKI the boot key made (Makefile), listed when it is
+        // there, so a release carries it exactly when it was signed.
+        var out: std.ArrayList(manifest.File) = .empty;
+        try out.appendSlice(gpa, &.{
+            .{ .name = "vmlinuz", .path = try gpa.print("{s}/slot/vmlinuz", .{p.out}) },
+            .{ .name = "stage0.zst", .path = try gpa.print("{s}/slot/stage0.zst", .{p.out}) },
+            .{
+                .name = "stage0-bitten.zst",
+                .path = try gpa.print("{s}/slot/stage0-bitten.zst", .{p.out}),
+            },
+            .{ .name = "root.erofs", .path = try gpa.print("{s}/slot/root.erofs", .{p.out}) },
+            .{ .name = "cmdline", .path = try gpa.print("{s}/slot/cmdline", .{p.out}) },
+            .{ .name = "disk.qcow2", .path = try gpa.print("{s}/disk.qcow2", .{p.out}) },
+        });
+        const uki = try gpa.print("{s}/slot/uki.efi", .{p.out});
+        if (Dir.cwd().access(io, uki, .{})) |_|
+            try out.append(gpa, .{ .name = "uki", .path = uki })
+        else |_|
+            try steps.note("no signed UKI in the release: WEREWOLF_BOOT_KEY was not set", .{});
+        break :blk out.items;
     };
     const id = manifest.write(io, gpa, &steps, dir, .{
         .form = f,

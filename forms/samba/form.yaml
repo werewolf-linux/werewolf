@@ -1,0 +1,62 @@
+# samba: a file server. smbd speaks SMB3 on port 445, encryption and
+# signing required, with no NetBIOS and no printers. Users are lines in
+# the config, name:password. Each has a directory under
+# /data/svc/samba/homes, and no UNIX account: the share's files are the
+# samba user's. Nobody connects without a password. See
+# forms/samba/README.md.
+base: prod
+
+packages:
+  - samba-server
+
+# smbd asks getpwnam for each share user. The root cannot grow /etc/passwd,
+# so this library answers from the file samba-init writes.
+programs: [samba-passwd.so]
+
+# The check speaks SMB with Samba's own client.
+dev:
+  - samba-client
+
+# PAM's password helper, setgid shadow, arrives through Samba's libraries.
+# Nothing here authenticates with a UNIX password.
+paths:
+  - path: /usr/bin/unix_chkpwd
+    type: permissions
+    permissions: 0o755
+
+# 445 is not HTTP.
+check:
+  skip: [http-answering]
+
+# smbd sets its umask to 0 so a share's create mask, not the process
+# umask, decides the mode of a new file. Those masks are 0600 and 0700.
+weaknesses:
+  processes-services-leashed: smbd sets its umask to 0 and applies the share's create mask itself
+
+services:
+  # smbd, as its own user. It may bind 445 and no other port, read its
+  # configuration, and write its directories on /data. samba-init writes
+  # the configuration and the password file from the users the config
+  # names. smbd starts the RPC helpers that this Samba ships.
+  samba:
+    exec: /usr/bin/smbd --foreground --debug-stdout --configfile /run/svc/samba/smb.conf
+    before: /usr/lib/werewolf/samba-init
+    user: samba
+    env: [LD_PRELOAD=/usr/lib/werewolf/samba-passwd.so]
+    pledge: stdio rpath wpath inet unix listen proc exec
+    listen: [tcp/445]
+    read: /run/svc/samba
+    run:
+      - /usr/bin/smbd
+      - /usr/lib/samba/samba-dcerpcd
+      - /usr/lib/samba/samba-bgqd
+      - /usr/lib/samba/rpcd_classic
+      - /usr/lib/samba/rpcd_epmapper
+      - /usr/lib/samba/rpcd_fsrvp
+      - /usr/lib/samba/rpcd_lsad
+      - /usr/lib/samba/rpcd_mdssvc
+      - /usr/lib/samba/rpcd_spoolss
+      - /usr/lib/samba/rpcd_winreg
+    config: users /run/config/samba/users
+    memory: 256
+    nofile: 4096

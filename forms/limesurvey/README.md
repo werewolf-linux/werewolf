@@ -1,10 +1,12 @@
-# LimeSurvey
+# LimeSurvey - Hardened VM
 
 Surveys and research data: [LimeSurvey](https://www.limesurvey.org) 7.5, its tables in MariaDB. The 6.x line is no longer supported. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+
+### Weaknesses
 
 - PHP runs LimeSurvey. That is named in `form.yaml`.
 
@@ -34,7 +36,7 @@ howl create limesurvey --with limesurvey --on gcp --allow-from me \
 
 Open `https://surveys.example.edu` once the name and TLS are in front of port 80. Mail and a directory are optional: `--smtp HOST:PORT`, `--smtp-user`, `--smtp-password`, `--mail-from`.
 
-### Migrating data in
+### Importing data
 
 The database has no TCP port. `--import` attaches a directory of SQL. MariaDB applies it once, while it makes the data directory. See [mariadb-local](../mariadb-local/README.md). A cloud cannot attach the disk.
 
@@ -53,4 +55,6 @@ Files the application stores itself are not on that disk. Bring those through th
 
 ### Network Exposure
 
-- tcp/80, nginx. Mail may leave on port 587, and a directory on port 636, when you name them.
+- listen: tcp/80 *
+- connect: tcp/587 global
+- connect: tcp/636 global

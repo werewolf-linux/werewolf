@@ -1,0 +1,4 @@
+# The one rule this form ships. suricata-update is not on the machine, so
+# a ruleset is a file you put here and a rebuild. The check looks for this
+# marker once a packet carrying it is on the wire.
+alert http any any -> any any (msg:"werewolf suricata marker"; flow:established,to_server; content:"werewolf-suricata-marker"; classtype:misc-activity; sid:1000001; rev:1;)

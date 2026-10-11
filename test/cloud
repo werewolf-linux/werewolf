@@ -176,9 +176,9 @@ seen "posture: .*\"host\":\"$name\"" && ok hostname || fail "hostname: posture d
 # signed (docs/design/verified-boot.md).
 case $cloud in
 gcp)
-	v=$(gcloud compute instances describe "$name" --zone "$GCP_ZONE" \
-		--format='value(shieldedInstanceConfig.enableVtpm,shieldedInstanceConfig.enableIntegrityMonitoring)' 2>/dev/null) ||
-		true
+	v=$(gcloud compute instances describe "$name" --zone "$zone" \
+		--format='value(shieldedInstanceConfig.enableVtpm,shieldedInstanceConfig.enableIntegrityMonitoring)' 2>/dev/null |
+		tr '\t' ' ') || true
 	[ "$v" = 'True True' ] && ok shielded || fail "shielded: vTPM and integrity monitoring are not both on: $v"
 	;;
 aws)
@@ -244,7 +244,7 @@ fi
 # create restarts the machine on it.
 echo "$name-b" >"$work/config/hostname"
 say "replacing its config"
-if "$howl" create "$name" --with "$form" --on "$cloud" --arch "$arch" --config "$work/config" >/dev/null; then
+if "$howl" create "$name" --with "$form" --on "$cloud" --arch "$arch" --build --config "$work/config" >/dev/null; then
 	await_posture "$name-b"
 	cat "$log" >>"$keep"
 	seen "posture: .*\"host\":\"$name-b\"" && ok reconfigure ||

@@ -34,7 +34,7 @@ howl create ollama --with ollama --on gcp --allow-from me
 
 `--allow-from me` admits your address to port 11434. The API still has no login.
 
-### Migrating data in
+### Importing data
 
 This machine starts empty. Pull a model with the client against the address howl prints. Models already on disk are in `/data/svc/ollama`, and the host cannot write that directory.
 
@@ -45,4 +45,4 @@ This machine starts empty. Pull a model with the client against the address howl
 
 ### Network Exposure
 
-tcp/11434
+- listen: tcp/11434 *

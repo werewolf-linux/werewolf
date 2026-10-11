@@ -42,7 +42,7 @@ howl create oauth2-proxy --with oauth2-proxy --on gcp --allow-from me --config c
 
 `--allow-from me` admits your address to port 4180. A form of your own points `upstreams` at the application on this machine.
 
-### Migrating data in
+### Importing data
 
 This machine starts empty. What it must remember is in the create command. There is no database to import.
 
@@ -53,4 +53,4 @@ This machine starts empty. What it must remember is in the create command. There
 
 ### Network Exposure
 
-tcp/4180
+- listen: tcp/4180 *

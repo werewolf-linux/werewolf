@@ -29,7 +29,7 @@ howl create valkey --with valkey --on gcp --allow-from me
 
 `--allow-from` opens no port: there is no listener. Keep the store on the same machine as the service that uses it.
 
-### Migrating data in
+### Importing data
 
 The host cannot reach this server. `--import` attaches a directory. `valkey-init` copies `dump.rdb` from it once, before the first start, and the server loads that file. Take the file from the old server with `valkey-cli --rdb dump.rdb`.
 

@@ -1,10 +1,12 @@
-# Bugsink
+# Bugsink - Hardened VM
 
 Error tracking that takes the events Sentry's SDKs send: [Bugsink](https://www.bugsink.com) 2, from its own image, with Caddy in front. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+
+### Weaknesses
 
 - Python runs Bugsink once the config is present. The machine without a config never starts it. Named in `form.yaml`.
 
@@ -36,7 +38,7 @@ howl create bugsink --with bugsink --on gcp --allow-from me \
 
 Sign in at `https://errors.example.com`, make a team and a project, and give its DSN to your application's Sentry SDK. There is no sign-up page.
 
-### Migrating data in
+### Importing data
 
 The database is SQLite in `/data`, and the host cannot write that directory. Point the SDK at this machine. Events from here on are the data.
 
@@ -49,4 +51,5 @@ The database is SQLite in `/data`, and the host cannot write that directory. Poi
 
 ### Network Exposure
 
-- tcp/80 and tcp/443, Caddy. Bugsink is on loopback.
+- listen: tcp/80 *
+- listen: tcp/443 *

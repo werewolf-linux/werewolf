@@ -29,7 +29,7 @@ howl create postgresql --with postgresql --on gcp --allow-from me
 
 `--allow-from` opens no port: there is no listener. Keep the database on the same machine as the service that queries it.
 
-### Migrating data in
+### Importing data
 
 The host cannot reach this server. `--import` attaches a directory of SQL. `pg-init` applies it once, in the `postgres` database, while it makes the cluster. [example/shop.sql](example/shop.sql) is a two-row shop. `CREATE DATABASE` is not available in that backend.
 

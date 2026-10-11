@@ -1,10 +1,10 @@
-# Galène
+# Galène - Hardened VM
 
 Videoconference for lectures and seminars: [Galène](https://galene.org) 1.2, with Caddy in front. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -32,7 +32,7 @@ howl create galene --with galene --on gcp --allow-from me \
 
 Point the name at the machine and open `https://meet.example.edu/group/cs101/`. Also open UDP 10000. Omit `--password` and the operator is alone until they invite someone. `--recording true` writes to `/data/svc/galene/recordings`. Students whose network blocks UDP need `--ice-servers` pointing at a TURN server you run elsewhere.
 
-### Migrating data in
+### Importing data
 
 Rooms and keys are in the create command or `--config`. There is no database to import.
 
@@ -45,4 +45,6 @@ Rooms and keys are in the create command or `--config`. There is no database to 
 
 ### Network Exposure
 
-- tcp/80 and tcp/443, Caddy. udp/10000, Galène, for the media.
+- listen: tcp/80 *
+- listen: tcp/443 *
+- listen: udp/10000 *

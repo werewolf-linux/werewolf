@@ -1,0 +1,8 @@
+# What the opencanary form, booted as it ships, must say on its console
+# (make check-shellfree-opencanary; test/boot). Setup writes the config
+# and the service starts. make check-opencanary checks a bait port and
+# that SMB is not listening.
+
+seen    setup-wrote   opencanary-setup: \{"event":"config written"\}
+seen    canary-start  leash: \{"event":"start","service":"opencanary"
+unseen  canary-down   leash: \{"event":"down","service":"opencanary"

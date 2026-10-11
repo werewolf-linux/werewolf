@@ -122,12 +122,12 @@ extract() {
 	' "$file"
 }
 
-# tcp_ports FILE prints tcp/N from Network Exposure, one per line.
+# tcp_ports FILE prints listen: tcp/N from Network Exposure, one per line.
 tcp_ports() {
 	awk '
 		/^### Network Exposure/ { in_net = 1; next }
 		in_net && /^##/ { exit }
-		in_net {
+		in_net && $0 ~ /listen:/ {
 			while (match($0, /tcp\/[0-9]+/)) {
 				print substr($0, RSTART, RLENGTH)
 				$0 = substr($0, RSTART + RLENGTH)
@@ -379,7 +379,8 @@ howl create blocky --with blocky --on gcp --allow-from me
 
 ### Network Exposure
 
-- tcp/53 and udp/53.
+- listen: tcp/53 *
+- listen: udp/53 *
 EOF
 	# The samples live under tmp, so point extract at that README directly.
 	out=$(extract "$readme" local blocky)

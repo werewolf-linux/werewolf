@@ -1,0 +1,27 @@
+# opencanary: prod, with OpenCanary's low-interaction listeners. The
+# image's launcher is a shell, so this runs the image's Python on twistd.
+# opencanary-setup writes the config before each start: FTP, SSH, HTTP,
+# Telnet, RDP and VNC only, logged to the console and to /data. No mail,
+# webhook, SMB or scan of the host's log. See forms/opencanary/README.md.
+base: prod
+
+# make check's (forms/README.md).
+check:
+  memory: 1024
+
+services:
+  # OpenCanary, as _oci-opencanary, inside its image. It may bind the bait
+  # ports and no other, reaches nothing, and runs only the image's Python.
+  # A login here is a log line. It is not an account on this machine.
+  opencanary:
+    image: docker.io/thinkst/opencanary:latest
+    exec: /usr/local/bin/python3.10 /opencanary/.venv/bin/twistd -n -o -y /opencanary/.venv/bin/opencanary.tac
+    before: /usr/lib/werewolf/opencanary-setup
+    pledge: stdio rpath wpath inet unix netlink listen proc exec
+    listen: [tcp/21 tcp/22 tcp/23 tcp/80 tcp/3389 tcp/5900]
+    run: /usr/local/bin/python3.10
+    memory: 256
+    env:
+      - HOME=/data
+      - PYTHONPATH=/opencanary/.venv/lib/python3.10/site-packages
+      - PYTHONDONTWRITEBYTECODE=1

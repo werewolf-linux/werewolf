@@ -1,10 +1,10 @@
-# Headscale
+# Headscale - Hardened VM
 
 A coordination server for Tailscale's clients, run by you: [Headscale](https://github.com/juanfont/headscale) 0.29, behind Caddy. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -38,7 +38,7 @@ howl create headscale --with headscale --on gcp --allow-from me \
 
 The OpenID client must allow `https://hs.example.com/oidc/callback`.
 
-### Migrating data in
+### Importing data
 
 The database is in `/data`, and the host cannot write that directory. The network starts empty. A node joins again with this machine's address. This form does not import a Headscale database.
 
@@ -51,4 +51,5 @@ The database is in `/data`, and the host cannot write that directory. The networ
 
 ### Network Exposure
 
-- tcp/80 and tcp/443, Caddy. Headscale is on loopback, and may call the DERP map and, when you configure it, your OpenID provider.
+- listen: tcp/80 *
+- listen: tcp/443 *

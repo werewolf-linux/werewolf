@@ -29,7 +29,7 @@ howl create caddy --with caddy --on gcp --allow-from me --domain www.example.com
 
 Point the name at the address howl prints. Caddy gets a certificate from Let's Encrypt once the name resolves, and renews it. Certificates live in `/data/svc/caddy`.
 
-### Migrating data in
+### Importing data
 
 This machine starts empty. The site and the Caddyfile are in the image. What differs per machine is `--domain`. There is no database to import.
 
@@ -41,4 +41,5 @@ This machine starts empty. The site and the Caddyfile are in the image. What dif
 
 ### Network Exposure
 
-tcp/80 tcp/443
+- listen: tcp/80 *
+- listen: tcp/443 *

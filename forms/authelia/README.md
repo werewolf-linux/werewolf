@@ -1,10 +1,10 @@
-# Authelia
+# Authelia - Hardened VM
 
 One sign-in for every site under your domain: [Authelia](https://www.authelia.com) 4.39, a password plus a TOTP app or a security key, with Caddy in front. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -36,7 +36,7 @@ howl create authelia --with authelia --on gcp --allow-from me \
 
 Sign in at `https://auth.example.com`. Point `example.com` and `*.example.com` at the machine. Add `--smtp-server`, `--smtp-sender`, `--smtp-username` and `--smtp-password` so a person can receive a one-time code and register a second factor. Keep `storage-key`: it encrypts the database.
 
-### Migrating data in
+### Importing data
 
 Users and policy are in the create command or `--config`. There is no database to import.
 
@@ -49,4 +49,5 @@ Users and policy are in the create command or `--config`. There is no database t
 
 ### Network Exposure
 
-- tcp/80 and tcp/443, Caddy. Authelia is on loopback. Mail leaves on the SMTP port you name.
+- listen: tcp/80 *
+- listen: tcp/443 *

@@ -18,6 +18,7 @@ sshd, for an operator to reach by security key (`ed25519-sk` or
 | `FORM-ARCH-vmlinuz` | the kernel |
 | `prod-ARCH-stage0.zst`, `prod-ARCH-stage0-bitten.zst`, `prod-ARCH-root.erofs`, `prod-ARCH-cmdline`, and the same for `prod-ssh` | the slot, and the kernel arguments it boots with, for bite to install beside a distro ([bite.md](bite.md)): stage0 for werewolf's own disk, and for a distro's after bite, which adds the modules of the distro's filesystem (xfs, btrfs) |
 | `minimal-ARCH-initramfs.zst`, `minimal-ARCH-cmdline` | the whole image, and the kernel arguments its host passes, for direct boot |
+| `FORM-ARCH-uki` | the whole slot as one signed PE — kernel, stage0, root and command line (tools/uki) — that firmware with Secure Boot on and the boot key enrolled boots whole; listed when the release was signed with one ([design/verified-boot.md](design/verified-boot.md)) |
 | `FORM-ARCH.json`, `FORM-ARCH.json.sig` | the manifest, signed |
 | `minimal.lock.json`, `prod.lock.json`, `prod-ssh.lock.json`, `kernel.lock.json`, `boot.lock.json` | every package, pinned: apko's locks |
 | `inputs` | what the release was built from |
@@ -228,6 +229,15 @@ gh secret set WEREWOLF_IMAGE_KEY --env release <image.key
 Then limit the environment to `main` (Settings, Environments), commit
 `release/image.pub`, and keep `image.key` offline. Until both exist, the
 workflow builds and checks, then fails at signing and publishes nothing.
+
+The boot key is the same arrangement for Secure Boot: RSA-2048
+(`openssl req -newkey rsa:2048 ... -x509 -days 9999`), held as
+`WEREWOLF_BOOT_KEY` and `WEREWOLF_BOOT_CRT` in the same environment, with
+systemd's stub fetched for `UKI_STUB` (tools/install-deps). Each release
+then carries its `uki`, and firmware holding the certificate's public
+half boots only what that key signed
+([design/verified-boot.md](design/verified-boot.md)). Without the secret,
+a release ships as before, with no UKI.
 
 ## Packages
 

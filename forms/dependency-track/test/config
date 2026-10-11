@@ -1,0 +1,8 @@
+#!/bin/sh
+# forms/dependency-track/test/config DIR: the administrator's password and
+# the domain localhost, for which Caddy's own CA signs.
+set -eu
+mkdir -p "$1/caddy"
+umask 077
+printf '%s' werewolf-check-pass-1 >"$1/caddy/admin-password"
+echo '{"domain":"localhost"}' >"$1/caddy/settings.json"

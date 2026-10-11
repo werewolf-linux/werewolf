@@ -1,10 +1,12 @@
-# Jellyfin
+# Jellyfin - Hardened VM
 
 Your media, in a browser or an app: [Jellyfin](https://jellyfin.org) 12.2, behind Caddy. Media is copied in over ssh. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+
+### Weaknesses
 
 - ssh brings a small set of tools, including a shell, for the people who log in. .NET runs Jellyfin and compiles it as it runs. All of that is named in `form.yaml`.
 
@@ -47,7 +49,7 @@ scp -i ~/.ssh/id_ed25519_sk -r Movies root@media.example.com:/data/svc/jellyfin/
 
 The library `Media` is that directory. Jellyfin scans it on its schedule, or at once from the dashboard.
 
-### Migrating data in
+### Importing data
 
 Media comes in over the ssh this form publishes, as the cloud section shows. There is no database dump, and `--import` does not carry media.
 
@@ -60,4 +62,6 @@ Media comes in over the ssh this form publishes, as the cloud section shows. The
 
 ### Network Exposure
 
-- tcp/80 and tcp/443, Caddy. tcp/22, ssh, for the people named in `--users`.
+- listen: tcp/80 *
+- listen: tcp/443 *
+- listen: tcp/22 *
