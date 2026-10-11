@@ -42,6 +42,14 @@ erofs_sha256=7d135aa2550326a5acf20f53c518aea5a8900015ce50700044e40f818c31dd80
 # Firecracker, on Linux: howl create keeps machines on it where there is KVM
 # (cmd/howl/firecracker.zig). No distribution packages it.
 fc_version=1.17.0
+# systemd's EFI stub, from Alpine's systemd-efistub, both arches: what a
+# release's signed UKIs are built on (tools/uki; docs/design/verified-boot.md).
+# shellcheck disable=SC2034 # each arch's sum is read by eval in the loop below
+stub_version=262-r0
+# shellcheck disable=SC2034 # read by eval in the stub loop
+stub_sha256_aarch64=7be825812630f8f6f54d56fcd929e8976ced344ff6a54e62906bb53b85a72ce2
+# shellcheck disable=SC2034 # read by eval in the stub loop
+stub_sha256_x86_64=ee4f54e22b2ad91cf9176607a45c160951585bd553fcc05eb524c32f3f44a3b0
 
 die() {
 	echo "install-deps: $*" >&2
@@ -104,7 +112,7 @@ Darwin)
 	system="macOS $(sw_vers -productVersion)"
 	pm=brew
 	install="brew install"
-	pkgs="apko melange crane lima qemu zstd zig mtools e2fsprogs"
+	pkgs="apko melange crane lima qemu zstd zig mtools e2fsprogs osslsigncode"
 	apko_pkgs=apko
 	zig_pkgs=zig
 	# Homebrew's erofs-utils has no zstd, so build it into Homebrew's
@@ -153,7 +161,7 @@ Linux)
 		update="$apt update"
 		install="$apt install -y --no-install-recommends"
 		pkgs="ca-certificates curl make xz-utils zstd libarchive-tools erofs-utils e2fsprogs mtools
-			qemu-utils expect netcat-openbsd python3-pip systemd-container bubblewrap $qemu"
+			qemu-utils expect netcat-openbsd osslsigncode python3-pip systemd-container bubblewrap $qemu"
 		apko_pkgs="ca-certificates curl"
 		zig_pkgs="ca-certificates curl xz-utils"
 		erofs_deps="autoconf automake libtool pkg-config gcc liblz4-dev libzstd-dev uuid-dev zlib1g-dev"
@@ -165,7 +173,7 @@ Linux)
 		esac
 		pm=dnf
 		install="dnf install -y"
-		pkgs="curl make xz zstd bsdtar erofs-utils e2fsprogs mtools qemu-img expect netcat
+		pkgs="curl make xz zstd bsdtar erofs-utils e2fsprogs mtools qemu-img expect netcat osslsigncode
 			python3-pip systemd-container bubblewrap $qemu"
 		apko_pkgs=curl
 		zig_pkgs="curl xz"
@@ -182,7 +190,7 @@ Linux)
 		# systemd includes systemd-nspawn.
 		install="pacman -Syu --needed --noconfirm"
 		pkgs="curl make xz zstd libarchive erofs-utils e2fsprogs mtools qemu-img expect openbsd-netcat
-			python-pip bubblewrap $qemu"
+			osslsigncode python-pip bubblewrap $qemu"
 		apko_pkgs=curl
 		zig_pkgs="curl xz"
 		erofs_deps="base-devel lz4 zstd util-linux-libs zlib"
@@ -239,7 +247,7 @@ esac
 
 # Work out what to do: the packages not installed, and upstream tools that
 # are missing or not the pinned version.
-need_apko='' need_melange='' need_crane='' need_zig='' need_erofs='' need_fc=''
+need_apko='' need_melange='' need_crane='' need_zig='' need_erofs='' need_fc='' need_stubs=''
 if [ -n "$zos" ]; then
 	! wants apko || [ "$(apko_version)" = "v$apko_version" ] || need_apko=yes
 	! wants zig || [ "$(zig version 2>/dev/null)" = "$zig_version" ] || need_zig=yes
@@ -250,6 +258,11 @@ if [ "$zos" = linux ] && [ -z "$only" ]; then
 	[ "$(melange_version)" = "$melange_version" ] || need_melange=yes
 fi
 [ -n "$only" ] || erofs_ok || need_erofs=yes
+# stubs_ok reports both arches' EFI stubs installed at the pinned version.
+stubs_ok() {
+	[ -f out/tools/stubs/stub_version ] && [ "$(cat out/tools/stubs/stub_version)" = "$stub_version" ]
+}
+[ -n "$only" ] || stubs_ok || need_stubs=yes
 if [ -n "$only" ]; then
 	pkgs=''
 	! wants apko || pkgs=$apko_pkgs
@@ -288,7 +301,7 @@ show() { # show COMMAND...: on one line, indented
 	echo
 }
 
-if [ -n "$missing$need_apko$need_melange$need_crane$need_zig$need_erofs$need_fc" ]; then
+if [ -n "$missing$need_apko$need_melange$need_crane$need_zig$need_erofs$need_fc$need_stubs" ]; then
 	echo "install-deps: on $system ($arch)${root:+, as root through $root}, this will:"
 	echo
 	if [ -n "$missing" ]; then
@@ -309,6 +322,8 @@ if [ -n "$missing$need_apko$need_melange$need_crane$need_zig$need_erofs$need_fc"
 		echo "  install zig $zig_version from ziglang.org in /usr/local/zig-$zig_version, linked as /usr/local/bin/zig"
 	[ -z "$need_fc" ] ||
 		echo "  install firecracker $fc_version from github.com/firecracker-microvm as /usr/local/bin/firecracker"
+	[ -z "$need_stubs" ] ||
+		echo "  install systemd's EFI stubs $stub_version from Alpine into out/tools/stubs, for the UKIs a boot key signs"
 	if [ -n "$need_erofs" ]; then
 		echo "  if mkfs.erofs is then older than 1.9 or has no zstd, build erofs-utils $erofs_version"
 		show into $erofs_prefix, after: $install $erofs_deps
@@ -425,6 +440,24 @@ if [ -n "$need_fc" ]; then
 	tar -xzf "$tmp/firecracker.tgz" -C "$tmp" "release-v$fc_version-$arch/firecracker-v$fc_version-$arch"
 	$root mkdir -p /usr/local/bin
 	$root install -m 0755 "$tmp/release-v$fc_version-$arch/firecracker-v$fc_version-$arch" /usr/local/bin/firecracker
+fi
+
+if [ -n "$need_stubs" ]; then
+	mkdir -p out/tools/stubs
+	for a in aarch64 x86_64; do
+		case $a in
+		aarch64) stub=linuxaa64.efi.stub ;;
+		x86_64) stub=linuxx64.efi.stub ;;
+		esac
+		sum=$(eval "echo \$stub_sha256_$a")
+		fetch "https://dl-cdn.alpinelinux.org/alpine/edge/main/$a/systemd-efistub-$stub_version.apk" \
+			"$sum" "efistub-$a.apk"
+		mkdir -p "out/tools/stubs/$a"
+		tar -xzf "$tmp/efistub-$a.apk" -C "out/tools/stubs/$a" --strip-components=5 \
+			"usr/lib/systemd/boot/efi/$stub"
+		mv "out/tools/stubs/$a/$stub" "out/tools/stubs/$a/linux.efi.stub"
+	done
+	echo "$stub_version" >out/tools/stubs/stub_version
 fi
 
 hash -r

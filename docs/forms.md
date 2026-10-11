@@ -98,7 +98,7 @@ and key, and `make list-forms` shows the chains.
 | `dependency-track` | `prod`, with `postgresql`, `caddy` | Dependency-Track, the published administrator password replaced before it is reachable ([dependency-track.md](../forms/dependency-track/README.md)) |
 | `bloodhound` | `prod`, with `postgresql`, `caddy` | BloodHound CE, Neo4j's HTTP off, the community-edition password refused ([bloodhound.md](../forms/bloodhound/README.md)) |
 | `iris` | `prod`, with `postgresql`, `caddy` | DFIR-IRIS, the administrator from the config, the web server on loopback ([iris.md](../forms/iris/README.md)) |
-| `misp` | `prod`, with `mariadb-tcp`, `valkey` | MISP core, the image's published passwords not set, modules not started ([misp.md](../forms/misp/README.md)) |
+| `misp` | `prod`, with `mariadb-tcp`, `valkey`, `caddy` | MISP core behind Caddy, the image's published passwords not set, modules not started ([misp.md](../forms/misp/README.md)) |
 | `greenbone` | `prod`, with `postgresql`, `caddy` | Greenbone's manager and web UI, `admin`/`admin` refused, no scanner ([greenbone.md](../forms/greenbone/README.md)) |
 
 Every form boots the same way. stage0 opens the form's `root.erofs`

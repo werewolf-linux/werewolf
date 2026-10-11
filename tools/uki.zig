@@ -21,12 +21,15 @@ pub fn main(init: std.process.Init) !void {
     var names: std.ArrayList([]const u8) = .empty;
     var datas: std.ArrayList([]const u8) = .empty;
     for (args[3..]) |a| {
-        const eq = std.mem.indexOfScalar(u8, a, '=') orelse {
+        const eq = std.mem.findScalar(u8, a, '=') orelse {
             std.log.err("usage: uki STUB OUT NAME=FILE...", .{});
             std.process.exit(2);
         };
         try names.append(gpa, a[0..eq]);
-        try datas.append(gpa, try Dir.cwd().readFileAlloc(io, a[eq + 1 ..], gpa, .limited(512 << 20)));
+        try datas.append(
+            gpa,
+            try Dir.cwd().readFileAlloc(io, a[eq + 1 ..], gpa, .limited(512 << 20)),
+        );
     }
     const out = try assemble(gpa, stub, names.items, datas.items);
     try Dir.cwd().writeFile(io, .{ .sub_path = args[2], .data = out });
@@ -59,7 +62,8 @@ const Error = error{
 fn parse(image: []const u8) Error!Pe {
     if (image.len < 0x40 or !std.mem.eql(u8, image[0..2], "MZ")) return Error.NotPE;
     const pe = std.mem.readInt(u32, image[0x3c..][0..4], .little);
-    if (pe + 24 > image.len or !std.mem.eql(u8, image[pe..][0..4], "PE\x00\x00")) return Error.NotPE;
+    if (pe + 24 > image.len or
+        !std.mem.eql(u8, image[pe..][0..4], "PE\x00\x00")) return Error.NotPE;
     const coff = pe + 4;
     var p: Pe = .{
         .coff = coff,
@@ -92,7 +96,12 @@ fn parse(image: []const u8) Error!Pe {
 /// and returns the image: sections laid out in order after the last one's
 /// raw data, their headers in the room between the headers and the first
 /// section's raw data, and the header patched to count and cover them.
-fn assemble(gpa: std.mem.Allocator, stub: []const u8, names: []const []const u8, datas: []const []const u8) ![]const u8 {
+fn assemble(
+    gpa: std.mem.Allocator,
+    stub: []const u8,
+    names: []const []const u8,
+    datas: []const []const u8,
+) ![]const u8 {
     const p = try parse(stub);
     const headers_end = p.sections + p.nsections * 40;
     if (headers_end + names.len * 40 > p.first_raw) return Error.NoHeaderRoom;
@@ -189,7 +198,10 @@ test "assemble appends sections the headers name, and the header counts" {
     // VirtualSize holds the data's length; SizeOfRawData is file-aligned.
     const cmdline = p.sections + 40;
     try testing.expectEqual(@as(u32, 16), std.mem.readInt(u32, out[cmdline + 8 ..][0..4], .little));
-    try testing.expectEqual(@as(u32, 0x200), std.mem.readInt(u32, out[cmdline + 16 ..][0..4], .little));
+    try testing.expectEqual(
+        @as(u32, 0x200),
+        std.mem.readInt(u32, out[cmdline + 16 ..][0..4], .little),
+    );
 
     // The section's raw data is where its header says, past the stub.
     const raw = std.mem.readInt(u32, out[cmdline + 20 ..][0..4], .little);

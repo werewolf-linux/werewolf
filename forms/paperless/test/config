@@ -1,0 +1,11 @@
+#!/bin/sh
+# forms/paperless/test/config DIR: the paperless form's config for make
+# check. The domain is localhost, which Caddy's own CA signs. The
+# administrator is admin, and test/checks signs in with the password.
+set -eu
+mkdir -p "$1/paperless" "$1/caddy"
+umask 077
+printf '%s' werewolf-check-secret-key >"$1/paperless/secret-key"
+printf '%s' werewolf-check-password >"$1/paperless/admin-password"
+echo '{"domain":"localhost","admin":"admin"}' >"$1/paperless/settings.json"
+echo '{"domain":"localhost"}' >"$1/caddy/settings.json"

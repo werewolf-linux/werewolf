@@ -1,6 +1,8 @@
 # What the misp form, booted as it ships, without a config, must say on
 # its console (make check-shellfree-misp; test/boot). Given no
-# administrator's password, or no site, MISP parks before it serves.
-# make check-misp boots it with its config.
+# administrator's password, MISP parks before it serves. With no
+# domain, so does Caddy. make check-misp boots it with its config.
 
 seen    misp-needs-password  leash: \{"event":"down","service":"misp","why":"config admin-password: FileNotFound"\}
+seen    caddy-needs-domain   service-config: \{"event":"settings","service":"caddy","setting":"domain","why":"required"\}
+seen    caddy-parked         leash: \{"event":"down","service":"caddy","why":"settings refused; service-config said why"\}

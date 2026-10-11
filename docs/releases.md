@@ -230,10 +230,10 @@ Then limit the environment to `main` (Settings, Environments), commit
 `release/image.pub`, and keep `image.key` offline. Until both exist, the
 workflow builds and checks, then fails at signing and publishes nothing.
 
-The boot key is the same arrangement for Secure Boot: RSA-2048
-(`openssl req -newkey rsa:2048 ... -x509 -days 9999`), held as
-`WEREWOLF_BOOT_KEY` and `WEREWOLF_BOOT_CRT` in the same environment, with
-systemd's stub fetched for `UKI_STUB` (tools/install-deps). Each release
+The boot key is the same arrangement for Secure Boot: RSA-2048, its
+public half committed as `release/boot.crt` and its private held as
+`WEREWOLF_BOOT_KEY` in the same environment; systemd's stub comes with
+tools/install-deps. Each release
 then carries its `uki`, and firmware holding the certificate's public
 half boots only what that key signed
 ([design/verified-boot.md](design/verified-boot.md)). Without the secret,

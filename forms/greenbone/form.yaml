@@ -36,19 +36,20 @@ check:
 services:
   # gvmd, as _oci-gvmd, inside its image. greenbone-run migrates, sets
   # the administrator from the config, and execs gvmd on a Unix socket.
-  # The socket is mode 0666 so gvm-link, a different user, can open it.
-  # GMP still wants the password. share lets that user walk to the
-  # socket. It reaches PostgreSQL and nothing else. A missing password
-  # parks it. The image's bash may run gvmd.
+  # The socket is mode 0660. Its group is _oci-gvmd, which gvm-link
+  # keeps after it drops. GMP still wants the password. share: group
+  # is that directory. It reaches PostgreSQL and nothing else. A
+  # missing password parks it. The image's bash may run gvmd.
   gvmd:
     image: registry.community.greenbone.net/community/gvmd:stable
     exec: /usr/bin/bash /usr/lib/werewolf/greenbone-run
     pledge: stdio rpath wpath inet unix netlink connect listen proc exec
     connect: [tcp/5432]
     write: [/var/lib/gvm, /var/log/gvm]
-    share: shared
+    share: group
     run:
       - /usr/bin/bash
+      - /usr/bin/grep
       - /usr/local/sbin/gvmd
     config: admin-password /run/config/gvmd/admin-password
     memory: 1024

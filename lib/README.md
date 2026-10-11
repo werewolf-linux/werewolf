@@ -18,7 +18,8 @@ within a byte limit and a deadline. Used by most programs in `cmd/`.
   `dropTo` and `keepOnly` set it again, and exit if the parent died.
 - `dropTo` clears the capability sets after `setresuid`, since under
   NO_SETUID_FIXUP the uid change alone would keep them, then checks that
-  uid 0 cannot be regained.
+  uid 0 cannot be regained. `dropWith` is the same and keeps only the
+  supplementary groups it is given.
 - Landlock rights are masked to the kernel's ABI. An old kernel leaves
   ports (before ABI 4) and scoping (before ABI 6) unrestricted;
   werewolf's kernel has both.

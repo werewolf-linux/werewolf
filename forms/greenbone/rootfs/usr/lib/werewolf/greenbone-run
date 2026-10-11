@@ -1,8 +1,9 @@
 # greenbone-run: bash, inside the gvmd image, as _oci-gvmd
 # (forms/greenbone/form.yaml). One script. It refuses a short password
 # and admin, migrates, sets the administrator, and replaces itself with
-# gvmd on loopback. It does not run gosu, and it does not leave the
-# socket mode 0666.
+# gvmd. It does not run gosu. The socket is mode 0660, so only
+# _oci-gvmd's group can open it. umask 007 keeps a create from masking
+# the group write that listen-mode asks for.
 set -eu
 pw=$(cat /tmp/admin-password)
 rm -f /tmp/admin-password
@@ -30,4 +31,5 @@ if /usr/local/sbin/gvmd --get-users --verbose | grep -q '^admin '; then
 else
 	/usr/local/sbin/gvmd --create-user=admin --password="$pw"
 fi
-exec /usr/local/sbin/gvmd -f --listen=/run/gvmd.sock --listen-mode=666
+umask 007
+exec /usr/local/sbin/gvmd -f --listen=/run/gvmd.sock --listen-mode=660

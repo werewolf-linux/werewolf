@@ -825,9 +825,11 @@ pub fn weaknesses(gpa: Allocator, top: Form, b: Build) Allocator.Error![]const u
 fn unbuilt(id: []const u8, generic: []const u8) []const u8 {
     const bare = if (id.len > 0 and id[0] == '?') id[1..] else id;
     if (mem.eql(u8, bare, "boot-secure-boot"))
-        return "Secure Boot is phase 5 of the boot design, not built: Alpine's kernel is not signed for it";
+        return "Secure Boot is phase 5 of the boot design, not built: Alpine's kernel is not " ++
+            "signed for it";
     if (mem.eql(u8, bare, "boot-sig-enforced"))
-        return "Alpine builds this kernel without signature enforcement; phase 4 builds werewolf's own";
+        return "Alpine builds this kernel without signature enforcement; phase 4 builds " ++
+            "werewolf's own";
     if (mem.eql(u8, bare, "boot-rollback-protected"))
         return "no TPM counter guards the slot serial yet: phase 5 of the boot design";
     return generic;

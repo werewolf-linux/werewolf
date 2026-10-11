@@ -1,0 +1,127 @@
+# paperless: Paperless-ngx 3.3, documents with OCR, behind Caddy, with
+# Valkey as its queue. The application is built from the release
+# (forms/paperless/melange/paperless.yaml). Tesseract, Ghostscript,
+# ImageMagick, poppler and qpdf are Wolfi's packages, not copies frozen
+# in Paperless's container image. Valkey is the valkey form, on its
+# socket. Sign-up is closed. The administrator comes from the config.
+# SQLite and the files are in /data/svc/paperless. See
+# forms/paperless/README.md.
+base: prod
+
+with: [valkey, caddy]
+
+packages:
+  # The interpreter, and what the wheels link. howl build-apk names the rest.
+  - python-3.13
+  - libstdc++
+  - libgcc
+  - zlib
+  # OCR and the file tools, Wolfi's, so a later package replaces them.
+  - tesseract
+  - tesseract-eng
+  - ghostscript
+  - imagemagick-7
+  - poppler-utils
+  - qpdf
+  - pngquant
+  - file
+  - font-liberation
+  - fontconfig
+  - tzdata
+
+# The checks sign in with curl, which keeps the token.
+dev:
+  - curl
+
+# make check's (forms/README.md): four Python programs, Valkey and Caddy.
+check:
+  memory: 4096
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  programs-no-interpreters: python3 runs Paperless, which is what this form is for
+
+services:
+  # Paperless, as its own user, in the valkey group so it can open the
+  # socket. paperless-run starts the web server on loopback, the consumer,
+  # the worker and the scheduler, and exits if one of them does. Before
+  # any of them, paperless-init makes the directories and waits for
+  # Valkey, then the database is migrated and the administrator is made
+  # from the config. It reaches Valkey's socket and nothing else. Sign-up
+  # is closed. Page cleaning is off: Wolfi does not package unpaper.
+  paperless:
+    exec: /usr/lib/werewolf/paperless-run
+    before:
+      - /usr/lib/werewolf/paperless-init
+      - /usr/lib/paperless/bin/python3 /usr/lib/paperless/app/manage.py migrate --skip-checks --no-input
+      - /usr/lib/paperless/bin/python3 /usr/lib/paperless/app/manage.py manage_superuser
+    user: paperless
+    group: valkey
+    # netlink: glibc lists the host's addresses before a lookup. watch: the
+    # consumer waits on the consume directory.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec watch
+    listen: [tcp/8000 loopback]
+    connect: /run/svc/valkey/valkey.sock
+    run:
+      - /usr/lib/paperless/bin/python3
+      - /usr/bin/tesseract
+      - /usr/bin/gs
+      - /usr/bin/convert
+      - /usr/bin/identify
+      - /usr/bin/qpdf
+      - /usr/bin/pdftoppm
+      - /usr/bin/pdfinfo
+      - /usr/bin/pdftotext
+      - /usr/bin/pngquant
+      - /usr/bin/file
+    secret:
+      - PAPERLESS_SECRET_KEY /run/config/paperless/secret-key
+      - PAPERLESS_ADMIN_PASSWORD /run/config/paperless/admin-password
+    config: settings /run/config/paperless/settings.json
+    setting:
+      - domain hostname required as DOMAIN
+      - admin string required as PAPERLESS_ADMIN_USER
+    render: env site
+    memory: 2048
+    nofile: 16384
+    env:
+      - PYTHONPATH=/usr/lib/paperless/app
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - PAPERLESS_REDIS=unix:///run/svc/valkey/valkey.sock
+      - PAPERLESS_DATA_DIR=/data/svc/paperless
+      - PAPERLESS_MEDIA_ROOT=/data/svc/paperless/media
+      - PAPERLESS_CONSUMPTION_DIR=/data/svc/paperless/consume
+      - PAPERLESS_SCRATCH_DIR=/run/svc/paperless/tmp
+      - PAPERLESS_STATICDIR=/usr/lib/paperless/static
+      - PAPERLESS_BIND_ADDR=127.0.0.1
+      - PAPERLESS_PORT=8000
+      - PAPERLESS_TIME_ZONE=UTC
+      - PAPERLESS_OCR_LANGUAGE=eng
+      - PAPERLESS_OCR_CLEAN=none
+      - PAPERLESS_ACCOUNT_ALLOW_SIGNUPS=false
+      - PAPERLESS_SOCIALACCOUNT_ALLOW_SIGNUPS=false
+      - PAPERLESS_TRUSTED_PROXIES=127.0.0.1
+
+  # Caddy, as its own user, for Paperless: ports 80 and 443, the ACME CA,
+  # a resolver, and Paperless on loopback. The site is the machine's
+  # domain, the same setting Paperless takes as DOMAIN.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8000]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

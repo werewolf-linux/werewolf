@@ -80,6 +80,8 @@ jobs:
   build:
     needs: inputs
     if: needs.inputs.outputs.build == 'true'
+    # The boot key, for the signed UKIs a release carries.
+    environment: release
     strategy:
       matrix:
         runner: [ubuntu-26.04, ubuntu-26.04-arm]
@@ -101,6 +103,8 @@ jobs:
           name: locks
           path: build/lock
       - name: Build
+        env:
+          WEREWOLF_BOOT_KEY: ${{ secrets.WEREWOLF_BOOT_KEY }}
         run: make dist
       - name: Boot and check
         if: matrix.copy == 1

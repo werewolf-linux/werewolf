@@ -57,8 +57,8 @@ image, so the host's programs-no-shell check still passes.
 | `bloodhound` | built | CE behind Caddy; Neo4j Bolt on loopback, HTTP off; Cypher mutations off; the community-edition password refused |
 | `wazuh` | not built | the manager's programs are mode 0750, root only; the tree is read-only, and the leash has dropped root |
 | `opencanary` | built | Python on twistd, not the image's shell; FTP, SSH, HTTP, Telnet, RDP and VNC only; SMB and the host's logs off; a banner on :21, nothing on :445 |
-| `misp` | built | the image's bash, then its entrypoint; the published database, Redis, GPG and supervisor passwords are not set; modules are not started |
-| `greenbone` | built | gvmd's socket carried to gsad by gvm-link; both behind Caddy; `admin`/`admin` refused; no scanner |
+| `misp` | built | PHP on loopback behind Caddy; misp-serve starts a fixed list, with no Python and no supervisor; published passwords are not set; modules are not started |
+| `greenbone` | built | gvmd's socket is mode 0660, group `_oci-gvmd`, carried by gvm-link; both behind Caddy; `admin`/`admin` refused; no scanner |
 | `iris` | built | gunicorn on loopback behind Caddy, via the image's bash; the administrator from the config; no worker |
 
 ## Drawbacks
@@ -66,7 +66,7 @@ image, so the host's programs-no-shell check still passes.
 span is a program we maintain. Two passwords for BloodHound, because
 two services cannot share one config key. Neo4j's password is set
 once; Dependency-Track's administrator is too. Greenbone on this
-machine does not scan. MISP's web server is the image's.
+machine does not scan. MISP's PHP listens on loopback.
 
 ## Alternatives Considered
 
@@ -88,8 +88,8 @@ cannot see a partial header and cannot write the feed. Velociraptor
 can run VQL that would exec; the leash allows only the server binary.
 BloodHound's metrics port is loopback. Neo4j sends no usage report.
 The bash these three forms run is the image's, and it is not on the
-host. gvmd's socket is mode 0666 so gvm-link can open it; a command
-on it still needs the administrator password.
+host. gvmd's socket is mode 0660 and its group is `_oci-gvmd`;
+gvm-link keeps that group. A command still needs the password.
 
 ## Reliability Considerations
 

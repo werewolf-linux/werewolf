@@ -73,17 +73,23 @@ pub fn check(p: *Posture) !void {
         .id = "boot-secure-boot",
         .area = "boot",
         .name = "Secure Boot on",
-        .why = "Whoever reaches the console or the disk can boot another kernel, or another stage0 with its own root hash. Firmware that verifies signatures boots only what was signed.",
+        .why = "Whoever reaches the console or the disk can boot another kernel, or another " ++
+            "stage0 with its own root hash. Firmware that verifies signatures boots only what " ++
+            "was signed.",
         .how = "the firmware's SecureBoot variable is on",
         .result = if (sb) |on| (if (on) .pass else .fail) else .skip,
-        .detail = if (sb == null) "no EFI variables to read: no EFI firmware, or a kernel without them" else "",
+        .detail = if (sb == null)
+            "no EFI variables to read: no EFI firmware, or a kernel without them"
+        else
+            "",
     });
     const sig = parseSwitch(p.read("/sys/module/module/parameters/sig_enforce"));
     try p.add(.{
         .id = "boot-sig-enforced",
         .area = "boot",
         .name = "Module signatures enforced",
-        .why = "Until init closes the module loader, the kernel's own build is all that decides what it runs: one built to refuse unsigned modules cannot be told to take them.",
+        .why = "Until init closes the module loader, the kernel's own build is all that decides " ++
+            "what it runs: one built to refuse unsigned modules cannot be told to take them.",
         .how = "/sys/module/module/parameters/sig_enforce is Y",
         .result = if (sig) |on| (if (on) .pass else .fail) else .skip,
         .detail = if (sig == null) "this kernel has no module signature switch" else "",
@@ -92,9 +98,14 @@ pub fn check(p: *Posture) !void {
         .id = "boot-rollback-protected",
         .area = "boot",
         .name = "Rollback protected",
-        .why = "An older image, still signed, is an easier target than a new one; the boot must refuse to go back to it.",
-        .how = "a TPM counter at least the running slot's serial, checked before handover, marked in " ++ rollback_marker,
-        .result = if (exists(p.io, "/dev/tpmrm0") and exists(p.io, rollback_marker)) .pass else .fail,
+        .why = "An older image, still signed, is an easier target than a new one; the boot must " ++
+            "refuse to go back to it.",
+        .how = "a TPM counter at least the running slot's serial, checked before handover, " ++
+            "marked in " ++ rollback_marker,
+        .result = if (exists(p.io, "/dev/tpmrm0") and exists(p.io, rollback_marker))
+            .pass
+        else
+            .fail,
         .detail = if (!exists(p.io, "/dev/tpmrm0"))
             "no TPM device: no counter to guard the slot serial"
         else

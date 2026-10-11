@@ -1,17 +1,6 @@
 //! gvm-link carries gvmd's socket to gsad. The two images do not share a
-//! directory, and gsad speaks to the manager only over a Unix socket.
-//!
-//!     gvm-link
-//!
-//! /etc/werewolf/gvm-link names the two sockets, on the host:
-//!
-//!     listen /run/svc/gsad/run/manager.sock
-//!     dial /run/svc/gvmd/run/gvmd.sock
-//!
-//! runit starts it as root (forms/greenbone/rootfs/etc/sv/gvm-link/run).
-//! It binds the listen socket, drops to _glink, and from then on only
-//! accepts, connects and copies bytes. gvmd's socket is mode 0666 so
-//! _glink can open it; GMP still wants the administrator password.
+//! directory. It binds as root, leaves the socket mode 0660, and drops
+//! to _glink keeping only the group _oci-gvmd. See its README.
 
 const std = @import("std");
 const sandbox = @import("sandbox");
@@ -21,6 +10,8 @@ const Allocator = std.mem.Allocator;
 
 const config_path = "/etc/werewolf/gvm-link";
 const drop_user = "_glink";
+const gvmd_group = "_oci-gvmd";
+const gsad_group = "_oci-gsad";
 
 const Config = struct { listen: []const u8, dial: []const u8 };
 
@@ -40,16 +31,19 @@ pub fn main(init: std.process.Init) void {
 fn run(io: Io, gpa: Allocator) !void {
     const cfg = try parse(try readFile(io, gpa, config_path, 512));
     const me = try account(io, gpa, drop_user);
-    const listen_fd = try bindListen(cfg.listen);
+    const groups = try readFile(io, gpa, "/etc/group", 1 << 20);
+    const gvmd = try groupIn(groups, gvmd_group);
+    const gsad = try groupIn(groups, gsad_group);
+    const listen_fd = try bindListen(cfg.listen, me.uid, gsad);
     say(io, "{{\"event\":\"start\",\"listen\":\"{s}\",\"dial\":\"{s}\"}}", .{ cfg.listen, cfg.dial });
-    try sandbox.dropTo(me.uid, null);
+    try sandbox.dropWith(me.uid, null, &.{gvmd});
     var filter: sandbox.Filter = .{};
     inline for ([_][]const u8{
-        "accept",   "accept4", "socket", "connect", "read",     "write",
-        "close",    "poll",    "ppoll",  "exit",    "exit_group", "futex",
-        "mmap",     "mprotect", "munmap", "brk",    "clone",    "clone3",
-        "rt_sigaction", "rt_sigreturn", "clock_gettime", "gettid",
-        "set_robust_list", "rseq", "madvise", "getrandom",
+        "accept",       "accept4",      "socket",        "connect", "read",            "write",
+        "close",        "poll",         "ppoll",         "exit",    "exit_group",      "futex",
+        "mmap",         "mprotect",     "munmap",        "brk",     "clone",           "clone3",
+        "rt_sigaction", "rt_sigreturn", "clock_gettime", "gettid",  "set_robust_list", "rseq",
+        "madvise",      "getrandom",
     }) |name| filter.allow(name);
     try filter.install();
     while (true) {
@@ -107,7 +101,7 @@ fn copySome(from: i32, to: i32, buf: []u8) bool {
     return true;
 }
 
-fn bindListen(path: []const u8) !i32 {
+fn bindListen(path: []const u8, owner: u32, group: u32) !i32 {
     if (std.fs.path.dirname(path)) |dir| {
         var i: u8 = 0;
         while (i < 60) : (i += 1) {
@@ -120,7 +114,6 @@ fn bindListen(path: []const u8) !i32 {
     var pz: [129]u8 = undefined;
     const pathz = try z(path, &pz);
     _ = linux.unlink(pathz);
-    _ = linux.syscall1(.umask, 0o111);
     const rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
     if (linux.errno(rc) != .SUCCESS) return error.Socket;
     const fd: i32 = @intCast(rc);
@@ -129,7 +122,9 @@ fn bindListen(path: []const u8) !i32 {
     @memcpy(addr.path[0..path.len], path);
     const len: linux.socklen_t = @intCast(2 + path.len + 1);
     if (linux.errno(linux.bind(fd, @ptrCast(&addr), len)) != .SUCCESS) return error.Bind;
-    if (linux.errno(linux.fchmod(fd, 0o666)) != .SUCCESS) return error.Mode;
+    // gsad's group can connect. Everyone else cannot.
+    if (linux.errno(linux.fchown(fd, owner, group)) != .SUCCESS) return error.Owner;
+    if (linux.errno(linux.fchmod(fd, 0o660)) != .SUCCESS) return error.Mode;
     if (linux.errno(linux.listen(fd, 16)) != .SUCCESS) return error.Listen;
     return fd;
 }
@@ -175,6 +170,21 @@ fn parse(text: []const u8) !Config {
 }
 
 const Account = struct { uid: u32, gid: u32 };
+
+fn groupIn(text: []const u8, name: []const u8) !u32 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        var f = std.mem.splitScalar(u8, line, ':');
+        const group = f.next() orelse continue;
+        if (!std.mem.eql(u8, group, name)) continue;
+        _ = f.next();
+        const gid = f.next() orelse return error.NoGroup;
+        const id = std.fmt.parseInt(u32, gid, 10) catch return error.NoGroup;
+        if (id < 65536) return error.LowGroup;
+        return id;
+    }
+    return error.NoGroup;
+}
 
 fn account(io: Io, gpa: Allocator, name: []const u8) !Account {
     const text = try readFile(io, gpa, "/etc/passwd", 1 << 20);
@@ -224,4 +234,11 @@ test "parse reads the two sockets" {
 test "parse refuses a relative path and a second listen" {
     try std.testing.expectError(error.BadConfig, parse("listen relative\n"));
     try std.testing.expectError(error.BadConfig, parse("listen /a\nlisten /b\ndial /c\n"));
+}
+
+test "group id is the third field, and a system group is refused" {
+    const text = "_oci-gvmd:x:70000:_glink\n_glink:x:71:\n";
+    try std.testing.expectEqual(@as(u32, 70000), try groupIn(text, "_oci-gvmd"));
+    try std.testing.expectError(error.LowGroup, groupIn(text, "_glink"));
+    try std.testing.expectError(error.NoGroup, groupIn(text, "_oci-gsad"));
 }

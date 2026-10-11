@@ -9,7 +9,6 @@
 # never hand over. make passes CHECK_ENV, BOOT_KEY, BOOT_CRT (Makefile).
 set -eu
 dir=${SECUREBOOT_DIR:-}
-key=${BOOT_KEY:?}
 crt=${BOOT_CRT:?}
 uki=$OUT/slot/uki.efi
 guid=a0420f26-3a13-4a1b-9c77-134e29b24bf1
@@ -103,7 +102,7 @@ signed_boot() { # signed_boot VARS LOG, then QEMU's arguments
 	vars=$1
 	log=$2
 	shift 2
-	for try in 1 2; do
+	for _ in 1 2; do
 		if boot "$vars" "$log" boots "$@"; then
 			whole "$log" && return 0
 			echo "werewolf-check: the posture line arrived broken; booting again"
