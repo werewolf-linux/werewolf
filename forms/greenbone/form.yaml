@@ -1,0 +1,113 @@
+# greenbone: prod, with gvmd and gsad from Greenbone's images, behind
+# Caddy, and PostgreSQL on loopback. gvmd's entrypoint is a shell that
+# drops through gosu; this execs the image's bash on one script. gsad is
+# its own program. The two images do not share a directory, so gvm-link
+# carries gvmd's socket to gsad. The administrator is not admin/admin.
+# The scanner and the feed are not on this machine. See
+# forms/greenbone/README.md.
+base: prod
+
+with: [postgresql, caddy]
+
+# Taken back of werewolf's defaults (lib/allow.zig): PostgreSQL compiles
+# costly queries to machine code with LLVM (jit = on, its default).
+allow: [jit]
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  kernel-write-xor-execute: PostgreSQL compiles costly queries to machine code with LLVM (allow jit, from postgresql)
+
+accounts:
+  groups:
+    - groupname: _glink
+      gid: 71
+  users:
+    - username: _glink
+      uid: 71
+      gid: 71
+      homedir: /var/empty
+      shell: /sbin/nologin
+
+# make check's (forms/README.md): gvmd beside PostgreSQL.
+check:
+  memory: 4096
+
+services:
+  # gvmd, as _oci-gvmd, inside its image. greenbone-run migrates, sets
+  # the administrator from the config, and execs gvmd on a Unix socket.
+  # The socket is mode 0666 so gvm-link, a different user, can open it.
+  # GMP still wants the password. share lets that user walk to the
+  # socket. It reaches PostgreSQL and nothing else. A missing password
+  # parks it. The image's bash may run gvmd.
+  gvmd:
+    image: registry.community.greenbone.net/community/gvmd:stable
+    exec: /usr/bin/bash /usr/lib/werewolf/greenbone-run
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec
+    connect: [tcp/5432]
+    write: [/var/lib/gvm, /var/log/gvm]
+    share: shared
+    run:
+      - /usr/bin/bash
+      - /usr/local/sbin/gvmd
+    config: admin-password /run/config/gvmd/admin-password
+    memory: 1024
+    nofile: 16384
+    env:
+      - PGHOST=127.0.0.1
+      - PGPORT=5432
+      - PGUSER=gvmd
+      - PGDATABASE=postgres
+
+  # gsad, as _oci-gsad, inside its image, on loopback. It speaks to gvmd
+  # through the socket gvm-link placed in its /run. Caddy is what the
+  # network sees.
+  gsad:
+    image: registry.community.greenbone.net/community/gsad:stable
+    exec: /usr/local/sbin/gsad -f --http-only --listen=127.0.0.1 --port=9392
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    listen: tcp/9392 loopback
+    connect: /run/manager.sock
+    share: shared
+    write: /var/log/gvm
+    memory: 256
+    nofile: 8192
+    env:
+      - GSAD_MANAGER_UNIX_SOCKET=/run/manager.sock
+      - GSAD_DROP_PRIVILEGES=0
+      - GSAD_DO_CHROOT=0
+      - GSAD_HTTP_ONLY=1
+      - GSAD_FOREGROUND=1
+
+  # PostgreSQL, as postgresql's form runs it, but also on loopback TCP:
+  # pg_hba.conf lets the role gvmd alone in that way, to the postgres
+  # database, and only gvmd's leash reaches it.
+  postgres:
+    exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses=127.0.0.1 -c unix_socket_directories=/run/svc/postgres -c hba_file=/usr/share/werewolf-greenbone/pg_hba.conf
+    before: /usr/lib/werewolf/pg-init
+    user: postgres
+    pledge: stdio rpath wpath inet proc ipc unix listen connect
+    listen: [tcp/5432 loopback]
+    run: /usr/bin/initdb
+    read: /run/werewolf/import
+    share: shared
+
+  # Caddy, as its own user, for gsad. The domain is the site.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/9392]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

@@ -1,0 +1,42 @@
+# iris-run: bash, inside the DFIR-IRIS image, as _oci-iris
+# (forms/iris/form.yaml). One script. It refuses a short password and the
+# published one, keeps a secret key on /data, and replaces itself with
+# gunicorn on loopback. It does not start the image's sleep loop.
+set -eu
+umask 077
+pw=$(cat /tmp/admin-password)
+rm -f /tmp/admin-password
+case $pw in
+*" "*|*"'"*|*'"'*|*'\'*|*$'\n'*|admin|administrator)
+	echo "iris-run: refusing that password" >&2
+	exit 1
+	;;
+esac
+[ "${#pw}" -ge 12 ] || {
+	echo "iris-run: password shorter than 12" >&2
+	exit 1
+}
+mkdir -p /data/downloads /data/templates /data/backup /data/assets /data/datastore
+py=/usr/local/bin/python3.9
+if [ ! -s /data/secret-key ]; then
+	"$py" -c 'import secrets; print(secrets.token_urlsafe(32), end="")' >/data/secret-key
+	"$py" -c 'import secrets; print(secrets.token_urlsafe(32), end="")' >/data/salt
+fi
+export IRIS_SECRET_KEY="$(cat /data/secret-key)"
+export IRIS_SECURITY_PASSWORD_SALT="$(cat /data/salt)"
+export IRIS_ADM_PASSWORD="$pw"
+export FLASK_APP=app:app
+cd /iriswebapp
+i=0
+until "$py" -c 'import socket; s=socket.create_connection(("127.0.0.1",5432),2); s.close()' 2>/dev/null; do
+	i=$((i + 1))
+	[ "$i" -le 90 ] || {
+		echo "iris-run: postgres did not answer" >&2
+		exit 1
+	}
+	sleep 1
+done
+"$py" -m flask db upgrade || echo "iris-run: flask db upgrade failed; gunicorn starts anyway" >&2
+exec "$py" /opt/venv/bin/gunicorn app:app \
+	--worker-class eventlet --workers 1 --bind 127.0.0.1:8000 \
+	--timeout 180 --worker-connections 100 --log-level info

@@ -1,0 +1,33 @@
+# greenbone-run: bash, inside the gvmd image, as _oci-gvmd
+# (forms/greenbone/form.yaml). One script. It refuses a short password
+# and admin, migrates, sets the administrator, and replaces itself with
+# gvmd on loopback. It does not run gosu, and it does not leave the
+# socket mode 0666.
+set -eu
+pw=$(cat /tmp/admin-password)
+rm -f /tmp/admin-password
+case $pw in
+*" "*|*"'"*|*'"'*|*'\'*|*$'\n'*|admin)
+	echo "greenbone-run: refusing that password" >&2
+	exit 1
+	;;
+esac
+[ "${#pw}" -ge 12 ] || {
+	echo "greenbone-run: password shorter than 12" >&2
+	exit 1
+}
+i=0
+until /usr/local/sbin/gvmd --migrate; do
+	i=$((i + 1))
+	[ "$i" -le 90 ] || {
+		echo "greenbone-run: postgres did not answer" >&2
+		exit 1
+	}
+	sleep 1
+done
+if /usr/local/sbin/gvmd --get-users --verbose | grep -q '^admin '; then
+	/usr/local/sbin/gvmd --user=admin --new-password="$pw"
+else
+	/usr/local/sbin/gvmd --create-user=admin --password="$pw"
+fi
+exec /usr/local/sbin/gvmd -f --listen=/run/gvmd.sock --listen-mode=666

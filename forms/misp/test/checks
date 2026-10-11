@@ -1,0 +1,7 @@
+# The login page answers. The image's published secrets are not the
+# process's. 3306 is 0x0CEA and 6379 is 0x18EB, both loopback.
+ok  misp-login   i=0; until wget -q -T 5 --no-check-certificate -O /tmp/misp-login.html https://localhost/users/login || wget -q -T 5 -O /tmp/misp-login.html http://localhost/users/login; do i=$((i + 1)); [ $i -le 300 ] || { echo "no login in 300 s"; exit 1; }; sleep 1; done; grep -qi password /tmp/misp-login.html
+ok  misp-user    p=$(head -n 1 /run/cgroup/svc/misp/cgroup.procs); u=$(grep '^_oci-misp:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  misp-db      grep -qi '0100007F:0CEA ' /proc/net/tcp && ! grep -qi '00000000:0CEA ' /proc/net/tcp && grep -qi '0100007F:18EB ' /proc/net/tcp
+ok  misp-secrets p=$(head -n 1 /run/cgroup/svc/misp/cgroup.procs); e=$(tr '\0' '\n' </proc/$p/environ); printf '%s\n' "$e" | grep -qx 'MYSQL_PASSWORD=misp' && printf '%s\n' "$e" | grep -qx 'ENABLE_REDIS_EMPTY_PASSWORD=true' && ! printf '%s\n' "$e" | grep -qx 'GPG_PASSPHRASE=passphrase' && ! printf '%s\n' "$e" | grep -qx 'SUPERVISOR_PASSWORD=supervisor' && ! printf '%s\n' "$e" | grep -qx 'ADMIN_PASSWORD=admin'
+ok  misp-published  wget -q -T 10 --no-check-certificate -S -O /tmp/misp-no.html --post-data 'data[User][email]=admin@admin.test&data[User][password]=admin' https://localhost/users/login 2>&1 | grep -Eq 'HTTP/[^ ]* (200|401|403)' && ! grep -qi '/events/index' /tmp/misp-no.html
