@@ -1,10 +1,12 @@
-# Moodle
+# Moodle - Hardened VM
 
 Courses for a school or a university: [Moodle](https://moodle.org) 5.3, the long-term release, with PostgreSQL and Caddy. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+
+### Weaknesses
 
 - PHP runs Moodle, and PostgreSQL may compile a query. Both are named in `form.yaml`.
 
@@ -32,7 +34,7 @@ howl create moodle --with moodle --on gcp --allow-from me \
 
 Sign in at `https://courses.example.edu`. Add `--smtp HOST:PORT`, `--smtp-user`, `--smtp-password` and `--mail-from` when you want mail. `--site-name` defaults to Moodle. Change the password in Moodle afterwards; a later start does not reset it.
 
-### Migrating data in
+### Importing data
 
 PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once, in the `postgres` database, while the cluster is first made. See [postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. A cloud cannot attach the disk.
 
@@ -52,4 +54,5 @@ Files the application stores itself are not on that disk. Bring those through th
 
 ### Network Exposure
 
-- tcp/80 and tcp/443, Caddy. Moodle and PostgreSQL are not on the network.
+- listen: tcp/80 *
+- listen: tcp/443 *

@@ -29,7 +29,7 @@ howl create mariadb-tcp --with mariadb-tcp --on gcp --allow-from me
 
 `--allow-from me` admits your address to port 3306.
 
-### Migrating data in
+### Importing data
 
 `--import` applies a directory of SQL once, while the data directory is first made. The accounts in it need passwords. `unix_socket` does not cross the network.
 
@@ -53,4 +53,4 @@ A form can still carry `rootfs/usr/share/werewolf-mariadb/NAME.sql`, applied bef
 
 ### Network Exposure
 
-tcp/3306
+- listen: tcp/3306 *

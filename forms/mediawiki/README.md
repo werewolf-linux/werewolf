@@ -1,10 +1,12 @@
-# MediaWiki
+# MediaWiki - Hardened VM
 
 A wiki for a lab or a department: [MediaWiki](https://www.mediawiki.org) 1.43, the long-term release, on SQLite. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+
+### Weaknesses
 
 - PHP runs the wiki, and PCRE may compile a pattern. Both are named in `form.yaml`.
 
@@ -32,7 +34,7 @@ howl create mediawiki --with mediawiki --on gcp --allow-from me \
 
 Open `https://wiki.lab.example.edu` once Caddy or the load balancer is in front and sends `X-Forwarded-Proto`. Reading is closed until you set `public-read` true. Only an administrator makes accounts. There is no mail, so there is no password reset by email.
 
-### Migrating data in
+### Importing data
 
 The database is SQLite in `/data`, and the host cannot write that directory. Export pages as XML from the old wiki and import them with Special:Import after this one is up.
 
@@ -45,4 +47,4 @@ The database is SQLite in `/data`, and the host cannot write that directory. Exp
 
 ### Network Exposure
 
-- tcp/80, nginx. Nothing leaves the machine.
+- listen: tcp/80 *

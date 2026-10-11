@@ -1,13 +1,16 @@
-# Overleaf
+# Overleaf - Hardened VM
 
 Collaborative LaTeX: [Overleaf Community Edition](https://github.com/overleaf/overleaf) 6.3, from Overleaf's own image, with MongoDB, Valkey and Caddy. The image is published for x86_64 only. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+
+- `\write18` can run only TeX Live's restricted helpers, not a command a document names.
+
+### Weaknesses
 
 - Node compiles as it runs. That is named in `form.yaml`.
-- `\write18` can run only TeX Live's restricted helpers, not a command a document names.
 
 ## Getting Started
 
@@ -35,7 +38,7 @@ howl create overleaf --with overleaf --on gcp --arch x86_64 --allow-from me \
 
 Sign in at `https://latex.example.com`. Make other accounts under Admin, Manage users. Add `--email-from`, `--smtp-host`, `--smtp-port`, `--smtp-user` and `config/overleaf/smtp-password` and Overleaf mails each a link; without them it shows you the link.
 
-### Migrating data in
+### Importing data
 
 Projects live in MongoDB. This form does not import a MongoDB dump. `--import` can carry Valkey's `dump.rdb`, which is a cache, not the projects. Bring a project in through the site after this machine is up.
 
@@ -49,4 +52,5 @@ Projects live in MongoDB. This form does not import a MongoDB dump. `--import` c
 
 ### Network Exposure
 
-- tcp/80 and tcp/443, Caddy. MongoDB, Valkey and the compiler listen on loopback.
+- listen: tcp/80 *
+- listen: tcp/443 *

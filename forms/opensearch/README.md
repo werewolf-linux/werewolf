@@ -1,10 +1,12 @@
-# OpenSearch
+# OpenSearch - Hardened VM
 
 One node of log search: [OpenSearch](https://opensearch.org) 3.9, TLS on, the security plugin on, no demo users. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+
+### Weaknesses
 
 - Java runs OpenSearch, and the JVM compiles it as it runs. Both are named in `form.yaml`.
 
@@ -44,7 +46,7 @@ howl create opensearch --with opensearch --on gcp --allow-from me \
 
 Replace those files with your corporation's CA, or a [step-ca](../step-ca/README.md) machine, when you have one. Shippers use `https://ADDRESS:9200`. Prefer users that `admin` creates in the security plugin over sharing `admin`.
 
-### Migrating data in
+### Importing data
 
 The cluster starts empty. Index through the HTTP API on the address howl prints. This form does not import a snapshot.
 
@@ -57,4 +59,4 @@ The cluster starts empty. Index through the HTTP API on the address howl prints.
 
 ### Network Exposure
 
-- tcp/9200, HTTPS, for clients you allow.
+- listen: tcp/9200 *

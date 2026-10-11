@@ -466,16 +466,12 @@ It needs a directory the host cannot make, given as `SECUREBOOT_DIR=DIR`:
 - `code.fd` and `vars.fd` — firmware that enforces Secure Boot and its
   empty variable store, as Ubuntu's `qemu-efi-aarch64` ships them:
   `AAVMF_CODE.secboot.fd` and `AAVMF_VARS.fd` from `/usr/share/AAVMF`.
-- `wk.key`, `wk.crt` and `vars-sb.fd` — a throwaway key, its certificate,
-  and the store with it enrolled as PK, KEK and db — only where
-  `virt-fw-vars` (Ubuntu's `python3-virt-firmware`) is not installed;
-  with it, the check makes a fresh key and enrolls it itself.
 
-On macOS, the pieces come from the CI VM:
-`limactl shell werewolf-ci-24.04 -- sudo apt-get install -y
-qemu-efi-aarch64 python3-virt-firmware`, copy the firmware out, and enroll
-once with `virt-fw-vars` there. `osslsigncode` signs; `brew install
-osslsigncode` brings it.
+The boot key is made fresh each run and enrolled as PK, KEK and db by
+`virt-fw-vars` — Ubuntu's `python3-virt-firmware` — wherever it is
+installed: here, or in the `werewolf-ci-24.04` VM, which the check
+reaches through `limactl` on macOS. `osslsigncode` signs the UKI; `brew
+install osslsigncode` brings it.
 
 ## Firecracker
 

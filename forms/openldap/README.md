@@ -1,10 +1,10 @@
-# OpenLDAP
+# OpenLDAP - Hardened VM
 
 A directory for the accounts a company already shares: [OpenLDAP](https://www.openldap.org) 2.6 on LDAPS alone. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -34,7 +34,7 @@ howl create openldap --with openldap --on gcp --allow-from me \
 
 Clients use `ldaps://ldap.example.com`. Use a certificate your CA signed for that name. The suffix is one `dc=` per label of `--domain`, and it cannot be renamed after the directory is made.
 
-### Migrating data in
+### Importing data
 
 The directory starts empty. Load an LDIF with `ldapadd` against the ldaps port howl prints. The host cannot write `/data`.
 
@@ -47,4 +47,4 @@ The directory starts empty. Load an LDIF with `ldapadd` against the ldaps port h
 
 ### Network Exposure
 
-- tcp/636, LDAPS, for clients you allow.
+- listen: tcp/636 *

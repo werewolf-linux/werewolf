@@ -35,7 +35,7 @@ howl create gitea --with gitea --on gcp --allow-from me --config config \
 
 Point the name at the address howl prints, and put TLS in front of port 3000. `--allow-from me` admits your address to ports 3000 and 22.
 
-### Migrating data in
+### Importing data
 
 Repositories and the SQLite database are in `/data/svc/gitea`, and the host cannot write that directory. After this machine is up, push each repository over HTTPS or SSH, or use the site's migrate-from-URL.
 
@@ -47,4 +47,5 @@ Repositories and the SQLite database are in `/data/svc/gitea`, and the host cann
 
 ### Network Exposure
 
-tcp/3000 tcp/22
+- listen: tcp/3000 *
+- listen: tcp/22 *

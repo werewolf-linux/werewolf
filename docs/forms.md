@@ -39,6 +39,7 @@ and key, and `make list-forms` shows the chains.
 | `wordpress` | `php` | WordPress on SQLite, installed from the config before it serves ([wordpress.md](../forms/wordpress/README.md)) |
 | `gatus` | `prod` | a status page watching a service ([gatus.md](../forms/gatus/README.md)) |
 | `sftpgo` | `prod` | SFTP for the users the config names, nothing else ([sftpgo.md](../forms/sftpgo/README.md)) |
+| `samba` | `prod` | SMB3 file shares, one directory per user, encryption required, no guest ([samba.md](../forms/samba/README.md)) |
 | `cloudflared` | `prod` | a Cloudflare Tunnel: hostnames served with no open port ([cloudflared.md](../forms/cloudflared/README.md)) |
 | `oauth2-proxy` | `prod` | a login in front of anything, by an OIDC provider ([oauth2-proxy.md](../forms/oauth2-proxy/README.md)) |
 | `mosquitto` | `prod` | an MQTT broker over TLS, users and ACLs from the config ([mosquitto.md](../forms/mosquitto/README.md)) |
@@ -52,6 +53,7 @@ and key, and `make list-forms` shows the chains.
 | `mox` | `prod` | a domain's mail: SMTP, IMAP, submission, webmail and its own certificates, as its own user, never root, built here with one patch ([mox.md](../forms/mox/README.md)) |
 | `haproxy` | `prod` | HAProxy 3.4 balancing HTTP over the backends its settings name, HTTPS with a certificate from the config, nothing to control it by but its configuration ([haproxy.md](../forms/haproxy/README.md)) |
 | `miniflux` | `prod`, with `postgresql`, `caddy` | a feed reader fetching from public addresses alone, its administrator from the config, built here ([miniflux.md](../forms/miniflux/README.md)) |
+| `continuwuity` | `prod`, with `caddy` | a Matrix homeserver, registration closed, its administrator from the config, federation on 443, built here ([continuwuity.md](../forms/continuwuity/README.md)) |
 | `prometheus` | `prod` | scraping the targets its settings name, and itself, one user on its web and API, its admin, lifecycle and remote-write APIs off ([prometheus.md](../forms/prometheus/README.md)) |
 | `loki` | `prod` | keeping pushed logs 31 days, behind Caddy's HTTPS and one user, Loki on loopback reaching nothing ([loki.md](../forms/loki/README.md)) |
 | `mariadb-local` | `prod` | MariaDB 12.3, the long-term release, on a UNIX socket alone for the machine's own services, made without a shell by mariadb-init ([mariadb-local.md](../forms/mariadb-local/README.md)) |
@@ -89,6 +91,12 @@ and key, and `make list-forms` shows the chains.
 | `mattermost` | `prod`, with `postgresql`, `caddy` | team chat, open sign-up and plugin uploads off ([mattermost.md](../forms/mattermost/README.md)) |
 | `zot` | `prod`, with `caddy` | an OCI registry, no anonymous pull or push ([zot.md](../forms/zot/README.md)) |
 | `opensearch` | `prod` | one node of log search, TLS and the security plugin on, no demo users ([opensearch.md](../forms/opensearch/README.md)) |
+| `suricata` | `prod` | Suricata on a packet feed, the rules in the image, no control socket ([suricata.md](../forms/suricata/README.md)) |
+| `opencanary` | `prod` | a low-interaction honeypot: six bait ports, nothing else, no real login ([opencanary.md](../forms/opencanary/README.md)) |
+| `zeek` | `prod` | Zeek on the same kind of feed, JSON logs, no packages ([zeek.md](../forms/zeek/README.md)) |
+| `velociraptor` | `prod` | the Velociraptor server, keys generated on the machine, the GUI on loopback ([velociraptor.md](../forms/velociraptor/README.md)) |
+| `dependency-track` | `prod`, with `postgresql`, `caddy` | Dependency-Track, the published administrator password replaced before it is reachable ([dependency-track.md](../forms/dependency-track/README.md)) |
+| `bloodhound` | `prod`, with `postgresql`, `caddy` | BloodHound CE, Neo4j's HTTP off, the community-edition password refused ([bloodhound.md](../forms/bloodhound/README.md)) |
 
 Every form boots the same way. stage0 opens the form's `root.erofs`
 read-only, through dm-verity, and hands over to init

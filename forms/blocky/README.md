@@ -1,10 +1,10 @@
-# Blocky
+# Blocky - Hardened VM
 
 DNS for a home or an office that blocks ads and trackers: [Blocky](https://0xerr0r.github.io/blocky/) 0.35, from its own image. There is no web interface. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -33,7 +33,7 @@ howl create blocky --with blocky --on proxmox \
 
 Give the address to the router's DHCP as the DNS server. Repeat a flag for another entry. An upstream must be `tcp-tls:` or `https:`.
 
-### Migrating data in
+### Importing data
 
 This machine starts empty. What it must remember is in the create command or `--config`. There is no database to import.
 
@@ -46,4 +46,5 @@ This machine starts empty. What it must remember is in the create command or `--
 
 ### Network Exposure
 
-- udp/53 and tcp/53. Nothing else listens.
+- listen: udp/53 *
+- listen: tcp/53 *

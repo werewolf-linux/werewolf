@@ -28,7 +28,7 @@ howl create gatus --with gatus --on gcp --allow-from me --target https://www.exa
 
 `--allow-from me` admits your address to port 8080.
 
-### Migrating data in
+### Importing data
 
 This machine starts empty. What it watches is `--target`. The history on the old server stays there. There is no database to import.
 
@@ -38,4 +38,4 @@ This machine starts empty. What it watches is `--target`. The history on the old
 
 ### Network Exposure
 
-tcp/8080
+- listen: tcp/8080 *

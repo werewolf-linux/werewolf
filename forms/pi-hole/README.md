@@ -1,10 +1,10 @@
-# Pi-hole
+# Pi-hole - Hardened VM
 
 DNS for a home network that answers ad and tracker names with `0.0.0.0`: [Pi-hole](https://pi-hole.net), from its own image, the web interface behind Caddy. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
 
 - Refreshing the lists runs bash, curl and coreutils from the image, as the Pi-hole user. pihole-FTL itself is one program. The host image has no shell.
 
@@ -40,7 +40,7 @@ howl create pi-hole --with pi-hole --on proxmox \
 
 Upstreams and lists are changed in the web interface and kept on `/data`. The password and the local-only mode come from the config.
 
-### Migrating data in
+### Importing data
 
 This machine starts empty. What it must remember is in the create command or `--config`. Gravity's lists are fetched after it is up. There is no database to copy in.
 
@@ -54,4 +54,7 @@ This machine starts empty. What it must remember is in the create command or `--
 
 ### Network Exposure
 
-- udp/53 and tcp/53, Pi-hole. tcp/80 and tcp/443, Caddy. The web interface is on loopback.
+- listen: udp/53 *
+- listen: tcp/53 *
+- listen: tcp/80 *
+- listen: tcp/443 *

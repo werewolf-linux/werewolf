@@ -50,4 +50,4 @@ How Werewolf's image differs from a standard deployment on other Linux distribut
 
 ### Network Exposure
 
-Listening sockets or external network connectivity allowances. Omit this section when there are none. Write each as `listens: tcp/PORT` or `listens: udp/PORT`, `connect: tcp/PORT`
+Listening sockets or external network connectivity allowances. Omit this section when there are none. Write each as a bullet point `listen: tcp/PORT <ip or *>` or `listen: udp/PORT <ip or *>`, `connect: tcp/PORT <ip/subnet/*>`

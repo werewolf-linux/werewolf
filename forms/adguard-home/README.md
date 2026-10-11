@@ -1,10 +1,10 @@
-# AdGuard Home
+# AdGuard Home - Hardened VM
 
 DNS for a home network, with a web interface: [AdGuard Home](https://adguard.com/adguard-home.html) 0.107, from its own image, behind Caddy. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -38,7 +38,7 @@ howl create adguard-home --with adguard-home --on proxmox \
 
 Keep port 53 on that network. `--upstreams tls://dns.quad9.net` and `--blocklists URL`, each repeated, replace the defaults, and a later start resets those two. Everything else you change in the UI stays.
 
-### Migrating data in
+### Importing data
 
 This machine starts empty. What it must remember is in the create command or `--config`. There is no database to import.
 
@@ -51,5 +51,7 @@ This machine starts empty. What it must remember is in the create command or `--
 
 ### Network Exposure
 
-- udp/53 and tcp/53, AdGuard Home.
-- tcp/80 and tcp/443, Caddy. The web interface listens on loopback.
+- listen: udp/53 *
+- listen: tcp/53 *
+- listen: tcp/80 *
+- listen: tcp/443 *

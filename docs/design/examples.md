@@ -65,7 +65,7 @@ with `sh`, with `build/host/howl` first on `PATH`. howl prints
 
 - reads the posture line from the console log howl kept, and requires the
   failures to be the form's `weaknesses`, as `test/boot` does
-- connects, from the host, to each `tcp/PORT` listed under Network Exposure
+- connects, from the host, to each `listen: tcp/PORT` under Network Exposure
 - runs `forms/NAME/test/probe` when that file exists, with the address and
   the scratch directory, so it can read the password the fence wrote
 - runs `howl delete NAME` on the way out, after a failure or a timeout too,

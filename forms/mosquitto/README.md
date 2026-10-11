@@ -38,7 +38,7 @@ howl create mosquitto --with mosquitto --on gcp --allow-from me --config config
 
 `--allow-from me` admits your address to port 8883. Use a certificate clients already trust. The password file is the same one.
 
-### Migrating data in
+### Importing data
 
 The broker starts empty. Clients publish to the address howl prints. Retained messages on the old broker stay there. There is no dump to copy in.
 
@@ -49,4 +49,4 @@ The broker starts empty. Clients publish to the address howl prints. Retained me
 
 ### Network Exposure
 
-tcp/8883
+- listen: tcp/8883 *

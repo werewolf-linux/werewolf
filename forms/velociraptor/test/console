@@ -1,0 +1,10 @@
+# What the velociraptor form, booted as it ships, without a shell and
+# without a config, must say on its console (make
+# check-shellfree-velociraptor; test/boot; forms/demo/test/console has the
+# format). Given no administrator's password, the server parks before it
+# generates keys or serves; with no domain, so does Caddy. make
+# check-velociraptor boots it with its config, and checks it serves.
+
+seen    velociraptor-needs-config  leash: \{"event":"down","service":"velociraptor","why":"config admin-password: FileNotFound"\}
+seen    caddy-needs-domain         service-config: \{"event":"settings","service":"caddy","setting":"domain","why":"required"\}
+seen    caddy-parked               leash: \{"event":"down","service":"caddy","why":"settings refused; service-config said why"\}

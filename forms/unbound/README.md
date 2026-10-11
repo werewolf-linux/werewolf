@@ -1,10 +1,10 @@
-# Unbound
+# Unbound - Hardened VM
 
 A recursive, validating resolver for a private network: [Unbound](https://nlnetlabs.nl/projects/unbound/). It answers the addresses you allow, and no one else. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -31,7 +31,7 @@ howl create unbound --with unbound --on gcp --allow-from 10.128.0.0/9 \
 
 `--forward-zones` is up to 32 names, each taken as unsigned. `--forward-to` is up to 32 addresses, all on port 53. AWS's resolver is the VPC network plus two (10.0.0.2). GCP's is 169.254.169.254. Azure's is 168.63.129.16.
 
-### Migrating data in
+### Importing data
 
 This machine starts empty. What it must remember is in the create command or `--config`. There is no database to import.
 
@@ -44,4 +44,5 @@ This machine starts empty. What it must remember is in the create command or `--
 
 ### Network Exposure
 
-- udp/53 and tcp/53, for the networks you allow. Unbound queries the public DNS itself.
+- listen: udp/53 *
+- listen: tcp/53 *

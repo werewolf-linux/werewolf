@@ -1,0 +1,5 @@
+#!/bin/sh
+# forms/suricata/test/config DIR: nothing. The form has no password and no
+# domain. make check still calls this.
+set -eu
+mkdir -p "$1"

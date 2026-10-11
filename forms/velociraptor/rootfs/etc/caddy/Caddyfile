@@ -1,0 +1,29 @@
+# Caddy for the velociraptor form: HTTPS for the machine's domain
+# (DOMAIN; howl --domain), with a certificate Caddy gets itself, and :80
+# sent there. The GUI is behind it, on loopback, speaking its own TLS.
+# leash starts Caddy (etc/sv/caddy/service) as caddy.
+{
+	admin off
+	log {
+		output stderr
+		format json
+	}
+	storage file_system /data/svc/caddy
+	servers {
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		protocols h1 h2
+	}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+	header -Server
+	reverse_proxy https://127.0.0.1:8889 {
+		transport http {
+			tls_insecure_skip_verify
+		}
+	}
+}

@@ -36,7 +36,7 @@ howl create nats --with nats --on gcp --allow-from me --config config
 
 `--allow-from me` admits your address to port 4222. Use a certificate clients already trust.
 
-### Migrating data in
+### Importing data
 
 The server starts empty. Clients publish to the address howl prints. This form does not import a stream. JetStream's files are in `/data/svc/nats`, at most 8 GB, and the host cannot write that directory.
 
@@ -46,4 +46,4 @@ The server starts empty. Clients publish to the address howl prints. This form d
 
 ### Network Exposure
 
-tcp/4222
+- listen: tcp/4222 *

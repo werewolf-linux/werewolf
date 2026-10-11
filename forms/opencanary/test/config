@@ -1,0 +1,5 @@
+#!/bin/sh
+# forms/opencanary/test/config DIR: nothing. The bait config is in the
+# image's setup program. make check still calls this.
+set -eu
+mkdir -p "$1"

@@ -1,10 +1,10 @@
-# Squid
+# Squid - Hardened VM
 
 An egress proxy: [Squid](https://www.squid-cache.org) connects to port 443 of the names you list, from the networks you list, and to nothing else. No cache and no cache manager. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -28,7 +28,7 @@ howl create squid --with squid --on gcp --allow-from me \
 
 `--networks` is up to 32 ranges, besides the machine itself. `--domains` is up to 32 names: `pypi.org` is that host, `.github.com` is that name and everything under it. A whole top-level domain (`.com`) is refused.
 
-### Migrating data in
+### Importing data
 
 This machine starts empty. What it must remember is in the create command or `--config`. There is no database to import.
 
@@ -41,4 +41,5 @@ This machine starts empty. What it must remember is in the create command or `--
 
 ### Network Exposure
 
-- tcp/3128, for the networks you name. Outbound CONNECT goes to public port 443 of a listed name.
+- listen: tcp/3128 *
+- connect: tcp/443 global

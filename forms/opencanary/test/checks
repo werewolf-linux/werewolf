@@ -1,0 +1,7 @@
+# FTP answers with its banner. SMB is not listening. The process is not
+# root; binding the low ports leaves it CAP_NET_BIND_SERVICE and nothing
+# else.
+ok  oc-ftp    i=0; until wget -T 3 -O /dev/null ftp://127.0.0.1/ 2>&1 | grep -q '220'; do i=$((i + 1)); [ $i -le 60 ] || { echo "no FTP banner in 60 s"; exit 1; }; sleep 1; done
+ok  oc-user   p=$(head -n 1 /run/cgroup/svc/opencanary/cgroup.procs); u=$(grep '^_oci-opencanary:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000400$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  oc-smb    ! grep -qi ':01BD ' /proc/net/tcp
+ok  oc-https  ! grep -qi ':01BB ' /proc/net/tcp

@@ -1,10 +1,12 @@
-# Nextcloud
+# Nextcloud - Hardened VM
 
 Files, calendars and contacts for a household: [Nextcloud](https://nextcloud.com) 35, with PostgreSQL, Valkey and Caddy. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+
+### Weaknesses
 
 - PHP runs Nextcloud, and PostgreSQL may compile a query. Both are named in `form.yaml`.
 
@@ -32,7 +34,7 @@ howl create nextcloud --with nextcloud --on gcp --allow-from me \
 
 Sign in at `https://cloud.example.com`. Nobody else can sign up: add people under Accounts. `--phone-region` is an ISO country code, for numbers written without one. Change the password in Nextcloud; a later start does not reset it.
 
-### Migrating data in
+### Importing data
 
 PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once, in the `postgres` database, while the cluster is first made. See [postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. The same directory may hold `dump.rdb` for Valkey. A cloud cannot attach the disk.
 
@@ -51,4 +53,7 @@ Files the application stores itself are not on that disk. Bring those through th
 
 ### Network Exposure
 
-- tcp/80 and tcp/443, Caddy. Nextcloud may fetch from public ports 80, 443, 465 and 587. PostgreSQL and Valkey are not on the network.
+- listen: tcp/80 *
+- listen: tcp/443 *
+- connect: tcp/465 global
+- connect: tcp/587 global

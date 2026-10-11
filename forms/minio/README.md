@@ -40,7 +40,7 @@ howl create minio --with minio --on gcp --allow-from me --config config
 
 `--allow-from me` admits your address to port 9000. Put TLS in front before a client sends the root password.
 
-### Migrating data in
+### Importing data
 
 This machine starts empty. Once port 9000 answers, mirror the old buckets to it with `mc`. The host cannot write `/data`.
 
@@ -51,4 +51,4 @@ This machine starts empty. Once port 9000 answers, mirror the old buckets to it 
 
 ### Network Exposure
 
-tcp/9000
+- listen: tcp/9000 *

@@ -1,0 +1,65 @@
+# velociraptor: prod, with the Velociraptor server behind Caddy. The
+# server's keys are generated on the machine, into /data, the first time
+# it starts; the administrator's password comes from the config and is
+# applied at every start. The GUI, API and monitoring listen on loopback.
+# Clients reach the frontend on :8000, which speaks mutual TLS. The server
+# may run only its own binary. See forms/velociraptor/README.md.
+base: prod
+
+packages:
+  - velociraptor
+  - caddy
+
+# make check's (forms/README.md): the server's own beside Caddy.
+check:
+  memory: 2048
+
+services:
+  # Velociraptor, as its own user. velociraptor-setup generates the server
+  # config once and sets the administrator from the config. A missing
+  # password or domain parks it. It may bind the frontend and, on
+  # loopback, the GUI, the API and monitoring; it reaches a resolver and
+  # nothing else, and the only program it may run is itself.
+  velociraptor:
+    exec: /usr/bin/velociraptor --nobanner --tempdir /run/svc/velociraptor --config /data/svc/velociraptor/server.config.yaml frontend
+    before: /usr/lib/werewolf/velociraptor-setup
+    user: velociraptor
+    # netlink: glibc's resolver lists the host's addresses before a lookup.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec
+    listen:
+      - tcp/8000
+      - tcp/8889 loopback
+      - tcp/8001 loopback
+      - tcp/8003 loopback
+    connect: [udp/53 tcp/53]
+    run: /usr/bin/velociraptor
+    config:
+      - admin-password /run/config/velociraptor/admin-password
+      - settings /run/config/velociraptor/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 1024
+    env:
+      - HOME=/run/svc/velociraptor
+
+  # Caddy, as its own user, for the GUI. The GUI speaks its own TLS, which
+  # Caddy does not verify: the connection is to loopback, and only Caddy
+  # may make it. Clients of the frontend do not come through here.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8889]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

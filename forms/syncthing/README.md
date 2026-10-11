@@ -1,10 +1,10 @@
-# Syncthing
+# Syncthing - Hardened VM
 
 Folders kept in sync with your other devices: [Syncthing](https://syncthing.net) 2.1, from its own image, the web interface behind Caddy. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -35,7 +35,7 @@ howl create syncthing --with syncthing --on gcp --allow-from me \
 
 Sign in at `https://sync.example.com` as `alice`. Add your other devices by their IDs, and share folders. New folders go under `/var/syncthing`, which is on `/data`.
 
-### Migrating data in
+### Importing data
 
 The other devices already hold the files. Add this machine to the folder after it is up. There is no dump to copy in.
 
@@ -48,4 +48,7 @@ The other devices already hold the files. Add this machine to the folder after i
 
 ### Network Exposure
 
-- tcp/22000 and udp/22000, Syncthing, for your devices. tcp/80 and tcp/443, Caddy, for the interface.
+- listen: tcp/22000 *
+- listen: udp/22000 *
+- listen: tcp/80 *
+- listen: tcp/443 *

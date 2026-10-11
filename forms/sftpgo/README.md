@@ -34,7 +34,7 @@ howl create sftpgo --with sftpgo --on gcp --allow-from me --config config
 
 `--allow-from me` admits your address to port 22. The same users file.
 
-### Migrating data in
+### Importing data
 
 This machine starts empty. Clients upload to the address howl prints. The host cannot write `/data`.
 
@@ -45,4 +45,4 @@ This machine starts empty. Clients upload to the address howl prints. The host c
 
 ### Network Exposure
 
-tcp/22
+- listen: tcp/22 *

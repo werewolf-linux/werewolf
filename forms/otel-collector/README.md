@@ -1,10 +1,10 @@
-# OpenTelemetry Collector
+# OpenTelemetry Collector - Hardened VM
 
 A place applications send traces, metrics and logs: the [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/), OTLP over TLS, forwarded to the one backend you name. The form's manifest is [form.yaml](form.yaml).
 
 ## Security Posture
 
-The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -38,7 +38,7 @@ howl create otel-collector --with otel-collector --on gcp --allow-from me \
 
 `--export` is an OTLP gRPC address on port 4317 or 443. The address above is a local port where nothing answers, so a span waits in the queue; point it at your backend when you have one. `--token` is one token a line. In the SDKs: `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20TOKEN`.
 
-### Migrating data in
+### Importing data
 
 This machine starts empty. What it must remember is in the create command or `--config`. There is no database to import.
 
@@ -51,4 +51,7 @@ This machine starts empty. What it must remember is in the create command or `--
 
 ### Network Exposure
 
-- tcp/4317 and tcp/4318, TLS, for senders you allow. The export connection leaves for the host you named.
+- listen: tcp/4317 *
+- listen: tcp/4318 *
+- connect: tcp/443 global
+- connect: tcp/4317 global
