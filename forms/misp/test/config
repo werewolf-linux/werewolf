@@ -1,7 +1,8 @@
 #!/bin/sh
 # forms/misp/test/config DIR: the administrator's password, and the site.
 set -eu
-mkdir -p "$1/misp"
+mkdir -p "$1/misp" "$1/caddy"
 umask 077
 printf '%s' werewolf-check-pass-1 >"$1/misp/admin-password"
 echo '{"base-url":"https://localhost","admin-email":"admin@localhost"}' >"$1/misp/settings.json"
+echo '{"domain":"localhost"}' >"$1/caddy/settings.json"

@@ -1,8 +1,9 @@
 # misp-run: bash, inside the MISP image, as _oci-misp
-# (forms/misp/form.yaml). One script. It refuses a short password and the
-# ones the image would publish, makes two passwords of its own, and
-# replaces itself with the image's entrypoint. supervisord stays in the
-# foreground. The host has no shell.
+# (forms/misp/form.yaml). One script. It refuses a short password and
+# the ones the image would publish, loads the schema, sets the
+# administrator, and replaces itself with misp-serve. PHP listens on
+# 127.0.0.1 only. The GPG passphrase stays in a file. It is not put
+# in the environment. There is no supervisor and no rsyslog.
 set -eu
 umask 077
 pw=$(cat /tmp/admin-password)
@@ -17,16 +18,75 @@ esac
 	echo "misp-run: password shorter than 12" >&2
 	exit 1
 }
-mkdir -p /data /var/www/MISP/app/Config /var/www/MISP/app/files /var/www/MISP/app/tmp
+case ${ADMIN_EMAIL-} in
+''|*'"'*|*"'"*|*'\'*|*$'\n'*)
+	echo "misp-run: refusing that email" >&2
+	exit 1
+	;;
+esac
+[ -n "${BASE_URL-}" ] || {
+	echo "misp-run: refusing that address" >&2
+	exit 1
+}
+
+mkdir -p /data /run/bin /var/www/MISP/app/Config /var/www/MISP/app/files /var/www/MISP/app/tmp/logs
+ln -sfn /usr/bin/php8.4 /run/bin/php
+export PATH="/run/bin:/usr/local/bin:/usr/bin"
+
 if [ ! -s /data/gpg-pass ]; then
 	/usr/bin/openssl rand -base64 24 >/data/gpg-pass
-	/usr/bin/openssl rand -base64 24 >/data/supervisor-pass
 fi
-export GPG_PASSPHRASE="$(tr -d '\n' </data/gpg-pass)"
-export SUPERVISOR_PASSWORD="$(tr -d '\n' </data/supervisor-pass)"
 export ADMIN_PASSWORD="$pw"
-export MISP_ADMIN_PASSPHRASE="$pw"
-if [ ! -f /var/www/MISP/app/Config/config.php ] && [ -d /var/www/MISP/app/Config.default ]; then
-	cp -a /var/www/MISP/app/Config.default/. /var/www/MISP/app/Config/
+
+cat >/var/www/MISP/app/Config/database.php <<'EOF'
+<?php
+class DATABASE_CONFIG {
+	public $default = array(
+		'datasource' => 'Database/MysqlExtended',
+		'persistent' => false,
+		'host' => '127.0.0.1',
+		'login' => 'misp',
+		'port' => 3306,
+		'password' => 'misp',
+		'database' => 'misp',
+		'prefix' => '',
+	);
+}
+EOF
+if [ ! -s /var/www/MISP/app/Config/config.php ]; then
+	printf '%s\n' '<?php' '$config=array();' >/var/www/MISP/app/Config/config.php
 fi
-exec /usr/bin/bash /entrypoint.sh
+if [ -d /var/www/MISP/app/files.dist ] && [ ! -f /data/files-seeded ]; then
+	cp -a /var/www/MISP/app/files.dist/. /var/www/MISP/app/files/
+	: >/data/files-seeded
+fi
+
+db() {
+	/usr/bin/mariadb -u misp -pmisp -h 127.0.0.1 -P 3306 misp "$@"
+}
+i=0
+until db -e "SELECT 1" >/dev/null 2>&1; do
+	i=$((i + 1))
+	[ "$i" -le 90 ] || {
+		echo "misp-run: database did not answer" >&2
+		exit 1
+	}
+	sleep 1
+done
+if ! db -e "DESCRIBE attributes" >/dev/null 2>&1; then
+	db </var/www/MISP/INSTALL/MYSQL.sql
+fi
+
+cake() {
+	/usr/bin/php8.4 -q /var/www/MISP/app/Console/cake.php -working /var/www/MISP/app "$@"
+}
+cake user init -q >/dev/null 2>&1 || true
+db -e "UPDATE users SET email = '${ADMIN_EMAIL}' WHERE id = 1;"
+cake Admin setSetting -q Security.password_policy_length 1
+cake Admin setSetting -q Security.password_policy_complexity '/.*/'
+cake User change_pw "$ADMIN_EMAIL" "$pw"
+cake Admin setSetting -q Security.password_policy_length 12
+cake Admin setSetting -q Security.password_policy_complexity '/.{12}/'
+cake Admin setSetting -q MISP.baseurl "$BASE_URL"
+unset ADMIN_PASSWORD
+exec /usr/lib/werewolf/misp-serve

@@ -41,7 +41,9 @@ pub fn check(p: *Posture) !void {
         .how = "werewolf's autoupdate service is present and not marked down",
         .result = if (!exists(p.io, "/usr/share/werewolf/form"))
             .skip
-        else if ((exists(p.io, "/etc/sv/autoupdate/run") or exists(p.io, "/etc/sv/autoupdate/service")) and !exists(p.io, "/etc/sv/autoupdate/down"))
+        else if ((exists(p.io, "/etc/sv/autoupdate/run") or
+            exists(p.io, "/etc/sv/autoupdate/service")) and
+            !exists(p.io, "/etc/sv/autoupdate/down"))
             .pass
         else
             .fail,

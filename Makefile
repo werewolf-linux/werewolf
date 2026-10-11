@@ -202,22 +202,24 @@ $(UKI_BIN): tools/uki.zig
 
 # A release's UKI: kernel, stage0, root and command line as one PE the boot
 # key signs (tools/uki; docs/design/verified-boot.md, docs/releases.md).
-# Built when WEREWOLF_BOOT_KEY and WEREWOLF_BOOT_CRT name the key and its
-# certificate, and UKI_STUB names systemd's linuxaa64.efi.stub.
-UKI_STUB ?=
+# Built when WEREWOLF_BOOT_KEY names the key; the certificate is the
+# committed release/boot.crt, and UKI_STUB systemd's linuxaa64.efi.stub.
+WEREWOLF_BOOT_CRT ?= release/boot.crt
+UKI_STUB ?= out/tools/stubs/$(ARCH)/linux.efi.stub
 UKI = $(OUT)/slot/uki.efi
 UKI_WORK = $(BUILD)/uki
 $(UKI): $(OUT)/slot/root.erofs $(OUT)/slot/stage0.zst $(OUT)/slot/cmdline $(BUILD)/vmlinuz $(UKI_BIN)
 	@[ -n "$(WEREWOLF_BOOT_KEY)" ] && [ -n "$(WEREWOLF_BOOT_CRT)" ] && [ -f "$(UKI_STUB)" ] || \
 		{ echo "$@: WEREWOLF_BOOT_KEY, WEREWOLF_BOOT_CRT and UKI_STUB (= systemd's linuxaa64.efi.stub) name the boot key and the stub (docs/testing.md)" >&2; exit 1; }
 	@mkdir -p $(UKI_WORK) && cp $(OUT)/slot/root.erofs $(UKI_WORK)/
+	@touch -t 197001010000 $(UKI_WORK)/root.erofs
 	@cd $(UKI_WORK) && $(TAR) -cf - --format newc --uid 0 --gid 0 --numeric-owner root.erofs | zstd -1 -q -c >root.cpio.zst
 	@cat $(OUT)/slot/stage0.zst $(UKI_WORK)/root.cpio.zst >$(UKI_WORK)/initrd
 	@printf '%s console=%s\0' "$$(cat $(OUT)/slot/cmdline)" $(CONSOLE) >$(UKI_WORK)/cmdline
 	@rm -f $(UKI).signed
 	$(UKI_BIN) $(UKI_STUB) $(UKI).unsigned .linux=$(BUILD)/vmlinuz .initrd=$(UKI_WORK)/initrd .cmdline=$(UKI_WORK)/cmdline
-	osslsigncode sign -certs $(WEREWOLF_BOOT_CRT) -key $(WEREWOLF_BOOT_KEY) -in $(UKI).unsigned -out $(UKI) >/dev/null
-	@rm -f $(UKI).unsigned
+	osslsigncode sign -certs $(WEREWOLF_BOOT_CRT) -key $(WEREWOLF_BOOT_KEY) -in $(UKI).unsigned -out $(UKI).signed >/dev/null
+	@mv -f $(UKI).signed $(UKI) && rm -f $(UKI).unsigned
 
 # Built under a temporary name, so a running check never finds an empty howl, which sh runs as a pass.
 howl: $(HOWL)
@@ -287,6 +289,12 @@ $(PACKAGE_TOOL): tools/package.zig lib/package.zig
 PACKAGE_FORMS = $(shell $(FORM_ASK) packaged)
 packages: $(PACKAGE_TOOL) $(FORM_TOOL) programs
 	@[ -n "$(PACKAGE_TIME)" ] || { echo "packages: no commit time; set PACKAGE_TIME" >&2; exit 1; }
+	# Where a boot key is given, each release form's slot gains its signed
+	# UKI first, so the packages below can carry it (docs/releases.md).
+	@[ -z "$(WEREWOLF_BOOT_KEY)" ] || [ -z "$(UKI_STUB)" ] || for f in $(RELEASE_FORMS); do \
+		$(MAKE) --no-print-directory FORM=$$f ARCH=$(ARCH) slot && \
+		$(MAKE) --no-print-directory FORM=$$f ARCH=$(ARCH) WEREWOLF_BOOT_KEY=$(WEREWOLF_BOOT_KEY) \
+			WEREWOLF_BOOT_CRT=$(WEREWOLF_BOOT_CRT) UKI_STUB=$(UKI_STUB) $(BUILD)/$$f/slot/uki.efi || exit 1; done
 	rm -rf $(PACKAGES)/$(ARCH) $(PACKAGES)/format $(PACKAGES)/advisories $(PACKAGES)/forms && mkdir -p $(PACKAGES)/$(ARCH) $(PACKAGES)/format/usr/lib/werewolf $(PACKAGES)/advisories/usr/share/werewolf
 	echo $(PACKAGE_FORMAT) >$(PACKAGES)/format/usr/lib/werewolf/format && $(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PACKAGES)/format \
 		werewolf-format$(PACKAGE_FORMAT) - $(ARCH) $(PACKAGE_TIME) "werewolf's format (lib/compose.zig)" provide:werewolf-format=$(PACKAGE_FORMAT)
@@ -294,10 +302,19 @@ packages: $(PACKAGE_TOOL) $(FORM_TOOL) programs
 		$(PACKAGES)/advisories werewolf-advisories - $(ARCH) $(PACKAGE_TIME) "werewolf's own advisories (release/advisories)"
 	for p in $(CMDS); do $(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PROGRAMS)/$$p werewolf-$$p - \
 		$(ARCH) $(PACKAGE_TIME) "werewolf's $$p (cmd/$$p)" depend:werewolf-format$(PACKAGE_FORMAT) || exit 1; done
+	# A signed UKI, when the boot key built one (docs/design/verified-boot.md):
+	# its package puts it in new roots, where installEsp lays it.
+	for f in $(RELEASE_FORMS); do [ ! -f $(BUILD)/$$f/slot/uki.efi ] || { \
+		t=$(PACKAGES)/uki/$$f/usr/lib/werewolf/uki && mkdir -p $$t && \
+		cp $(BUILD)/$$f/slot/uki.efi $$t/slot.efi && \
+		$(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PACKAGES)/uki/$$f uki-$$f - \
+		$(ARCH) $(PACKAGE_TIME) "werewolf's signed UKI for $$f (docs/design/verified-boot.md)" \
+		depend:werewolf-format$(PACKAGE_FORMAT) || exit 1; }; done
 	for f in $(PACKAGE_FORMS); do t=$(PACKAGES)/forms/$$f && $(FORM_TOOL) stage $$f $$t && \
 		{ [ ! -d $(PROGRAMS)/forms/$$f ] || cp -R $(PROGRAMS)/forms/$$f/. $$t/; } && \
 		$(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $$t $$f-form - $(ARCH) $(PACKAGE_TIME) "werewolf's form $$f (forms/$$f)" \
-		$$($(FORM_TOOL) depends $$f | sed 's/^/depend:/') || exit 1; done
+		$$($(FORM_TOOL) depends $$f | sed 's/^/depend:/') \
+		$$([ -f $(BUILD)/$$f/slot/uki.efi ] && [ -f $(PACKAGES)/uki/$$f/usr/lib/werewolf/uki/slot.efi ] && echo depend:uki-$$f) || exit 1; done
 	$(PACKAGE_TOOL) index $(PACKAGES)/$(ARCH) -
 	@echo "packages: $(words $(CMDS)) programs and $(words $(PACKAGE_FORMS)) forms in $(PACKAGES)/$(ARCH);" \
 		"sign APKINDEX.member, then build/host/package sign"
@@ -352,6 +369,11 @@ dist:
 _dist-form: $(HOWL)
 	@[ "$(BUILD)" = build/$(ARCH) ] && [ -z "$(DEV)$(APP)" ] || \
 		{ echo "_dist-form: a release builds in build/$(ARCH), without DEV or APP (howl build --app)" >&2; exit 1; }
+	# The slot's signed UKI, where a boot key is given, so the manifest
+	# lists it (cmd/howl/build.zig; docs/releases.md).
+	@[ -z "$(WEREWOLF_BOOT_KEY)" ] || $(MAKE) --no-print-directory FORM=$(FORM_REF) ARCH=$(ARCH) \
+		WEREWOLF_BOOT_KEY=$(WEREWOLF_BOOT_KEY) WEREWOLF_BOOT_CRT=$(WEREWOLF_BOOT_CRT) \
+		$(BUILD)/$(notdir $(patsubst %/,%,$(FORM_REF)))/slot/uki.efi
 	$(HOWL) build --verbose --with $(FORM_REF) --arch $(ARCH) -o $(DIST)
 
 # check-NAME builds what it boots, then runs test/check-NAME; machines share nothing, so -j works.

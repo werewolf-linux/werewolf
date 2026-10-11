@@ -89,12 +89,22 @@ pub fn limit(resource: linux.rlimit_resource, n: u64) !void {
 /// drops every capability. It returns error.StillRoot if uid 0 can be
 /// regained. It clears the capability sets after setresuid because, after
 /// keepOnly set NO_SETUID_FIXUP, the uid change alone would keep them.
+/// Supplementary groups are cleared.
 pub fn dropTo(id: u32, root: ?[*:0]const u8) !void {
+    try dropWith(id, root, &.{});
+}
+
+/// dropWith is dropTo that keeps groups as its only supplementary groups.
+/// An empty slice clears them. A caller that still needs a group, to open
+/// a mode 0660 socket, passes that group and no other.
+pub fn dropWith(id: u32, root: ?[*:0]const u8, groups: []const linux.gid_t) !void {
     const tie: Tie = .note();
     try bound(0);
     if (root) |r| _ = try sys(linux.chroot(r), "chroot");
     _ = try sys(linux.chdir("/"), "chdir /");
-    _ = try sys(linux.setgroups(0, &[_]linux.gid_t{}), "setgroups");
+    var unused: linux.gid_t = 0;
+    const list: [*]const linux.gid_t = if (groups.len == 0) @ptrCast(&unused) else groups.ptr;
+    _ = try sys(linux.setgroups(groups.len, list), "setgroups");
     _ = try sys(linux.setresgid(id, id, id), "setresgid");
     _ = try sys(linux.setresuid(id, id, id), "setresuid");
     var hdr: CapHeader = .{};

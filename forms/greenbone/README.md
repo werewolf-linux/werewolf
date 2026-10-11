@@ -4,12 +4,11 @@ Vulnerability management: [Greenbone](https://greenbone.github.io/docs/) gvmd an
 
 ## Security Posture
 
-- gsad and gvmd listen on loopback. Caddy is what the network sees.
+- gsad listens on loopback. Caddy is what the network sees.
 - The administrator is `admin`. The password is the config's, applied at every start. `admin` / `admin` is refused.
-- gvmd's socket is not mode 0666. It listens on loopback TCP.
+- gvmd's socket is mode 0660, group `_oci-gvmd`. gvm-link keeps that group after it drops to `_glink`. The socket it gives gsad is mode 0660, group `_oci-gsad`. A command on it still needs the administrator password.
 - PostgreSQL takes one role, over loopback, and only gvmd may connect.
 - The image's bash runs one script, then gvmd. gsad is its own program. The host has no shell.
-- gvmd's socket is mode 0666 so gvm-link can carry it to gsad. A command on it still needs the administrator password.
 
 ## Getting Started
 
@@ -39,7 +38,7 @@ The database starts empty. This form does not import a Greenbone dump.
 
 ### Known Quirks
 
-- gvmd listens on a Unix socket, not a TCP port. gvm-link, as `_glink`, copies it into gsad's directory. The socket is mode 0666.
+- gvmd listens on a Unix socket, not a TCP port. gvm-link, as `_glink` in the group `_oci-gvmd`, copies it into gsad's directory. Both sockets are mode 0660.
 - There is no scanner and no feed on this machine. A scan needs a scanner beside it.
 - The database password is not a secret: only gvmd can open the port.
 - Twelve characters at least, and not `admin`.

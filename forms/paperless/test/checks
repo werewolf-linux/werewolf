@@ -1,0 +1,15 @@
+# Paperless answers through Caddy over HTTPS, with a certificate from
+# Caddy's own CA for localhost, once its migrations have run and its
+# administrator is made: wait.
+ok  pl-up            i=0; until wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/ 2>&1 | grep -q 'HTTP/1.1 302'; do i=$((i + 1)); [ $i -le 180 ] || { echo "no login redirect in 180 s"; exit 1; }; sleep 1; done
+# Plain HTTP is sent to HTTPS.
+ok  pl-https         wget -q -T 5 -S -O /dev/null http://localhost/ 2>&1 | grep -qi 'Location: https://localhost/'
+# A stranger gets no document list. Sign-up has no password field.
+ok  pl-anon          code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost/api/documents/); [ "$code" = 401 ] || [ "$code" = 403 ]
+ok  pl-signup        curl -sfk https://localhost/accounts/signup/ | grep -q 'name="password1"' && { echo "signup is open"; exit 1; }; true
+# A wrong password gets no token. The administrator, the config's, does,
+# and the document list answers with it.
+ok  pl-wrong         [ "$(curl -sk -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"username":"admin","password":"wrong"}' https://localhost/api/token/)" = 400 ]
+ok  pl-login         curl -sfk -H 'Content-Type: application/json' -d '{"username":"admin","password":"werewolf-check-password"}' https://localhost/api/token/ | grep -o '"token":"[^"]*"' | cut -d'"' -f4 >/tmp/pl-token && [ -s /tmp/pl-token ] && curl -sfk -H "Authorization: Token $(cat /tmp/pl-token)" https://localhost/api/documents/ | grep -q '"count"'
+# The library is on /data, and paperless's.
+ok  pl-data          u=$(grep '^paperless:' /etc/passwd | cut -d: -f3); [ "$(stat -c %u /data/svc/paperless)" = "$u" ]

@@ -1,12 +1,13 @@
-# misp: prod, with MISP's core image, MariaDB and Valkey on loopback.
-# The image starts through bash; this execs that bash on one script, then
-# the image's own entrypoint, which runs supervisord. The published
-# database password, Redis password, GPG passphrase and supervisor
-# password are not used. The administrator's password is the config's.
-# See forms/misp/README.md.
+# misp: prod, with MISP's core image, MariaDB and Valkey on loopback,
+# and Caddy in front. The image starts through bash; this execs that
+# bash on one script, which replaces itself with misp-serve. PHP
+# listens on loopback. The published database password, Redis password
+# and GPG passphrase are not used. There is no Python and no
+# supervisor. The administrator's password is the config's. See
+# forms/misp/README.md.
 base: prod
 
-with: [mariadb-tcp, valkey]
+with: [mariadb-tcp, valkey, caddy]
 
 # make check's (forms/README.md): PHP's workers beside MariaDB.
 check:
@@ -14,31 +15,41 @@ check:
 
 services:
   # MISP, as _oci-misp, inside its image. misp-run reads the
-  # administrator's password, makes the GPG and supervisor passwords
-  # once, and execs the image's entrypoint. That entrypoint's defaults
-  # (example, redispassword, passphrase, supervisor, admin@admin.test)
-  # do not apply: the variables are already set. It reaches MariaDB,
-  # Valkey, and public addresses on 80 and 443 for feeds. A missing
-  # password, address or email parks it. The image's bash may run what
-  # supervisord starts: nginx, PHP, and the image's own programs.
+  # administrator's password, makes the GPG passphrase once, and execs
+  # misp-serve. The image's entrypoint is not used: it would publish
+  # FastCGI on every interface and start rsyslog, as root. PHP is on
+  # loopback. Workers are one each, as this user. misp-serve's list is
+  # the binary, so the web process cannot add a program. It reaches
+  # MariaDB, Valkey, and public addresses on 80 and 443 for feeds. A
+  # missing password, address or email parks it. The programs below
+  # are the ones those jobs exec.
   misp:
     image: ghcr.io/misp/misp-docker/misp-core:v2.5.50
     exec: /usr/bin/bash /usr/lib/werewolf/misp-run
     pledge: stdio rpath wpath inet unix netlink connect listen proc exec
-    listen: [tcp/80 tcp/443]
+    listen: tcp/8080 loopback
     connect: [tcp/3306 tcp/6379, tcp/443 tcp/80 public, udp/53 tcp/53]
     write:
       - /var/www/MISP/app/Config
       - /var/www/MISP/app/files
       - /var/www/MISP/app/tmp
     run:
-      - /bin/bash
       - /usr/bin/bash
-      - /usr/bin/tini
-      - /bin/
-      - /usr/bin/
-      - /usr/sbin/
-      - /usr/local/bin/
+      - /usr/bin/env
+      - /usr/bin/dash
+      - /usr/bin/openssl
+      - /usr/bin/php8.4
+      - /usr/bin/mariadb
+      - /usr/bin/mkdir
+      - /usr/bin/cp
+      - /usr/bin/cat
+      - /usr/bin/rm
+      - /usr/bin/ln
+      - /usr/bin/sleep
+      - /usr/bin/gpg
+      - /usr/bin/gpg-agent
+      - /usr/lib/werewolf/misp-serve
+      - /var/www/MISP/app/Console/
     config: admin-password /run/config/misp/admin-password
     setting:
       - base-url url required as BASE_URL
@@ -90,3 +101,23 @@ services:
     share: shared
     memory: 256
     nofile: 10240
+
+  # Caddy, as its own user, for MISP. The domain is the site.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8080]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB
