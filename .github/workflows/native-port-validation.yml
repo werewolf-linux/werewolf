@@ -1,0 +1,57 @@
+name: Native port validation
+
+on:
+  push:
+    branches: [codex/validate-native-ports-c4b363a]
+
+permissions:
+  contents: read
+
+jobs:
+  focused-x86:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    env:
+      MELANGE_CPU: '2'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Verify the tested code matches the parent revision
+        run: |
+          git diff --exit-code HEAD^ HEAD -- . ':(exclude).github/workflows/native-port-validation.yml'
+          git show --no-patch --format=fuller HEAD^
+      - name: Check out reviewed third-party package sources
+        env:
+          WEREWOLF_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_PACKAGES_REPOSITORY }}
+          WEREWOLF_PACKAGES_REF: ${{ vars.WEREWOLF_PACKAGES_REF }}
+          WEREWOLF_HARDENED_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REPOSITORY }}
+          WEREWOLF_HARDENED_PACKAGES_REF: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REF }}
+        run: tools/checkout-packages
+      - name: Make room for VM images
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet/sdk /usr/share/dotnet/packs
+          df -h .
+      - name: Install tools
+        run: sudo test/ci-setup
+      - uses: actions/setup-go@90ad2b35f69faf97585ad74d28fa006d2739b7af
+        with:
+          go-version: '1.27.x'
+          cache: false
+      - name: Native seed, reboot and shipping checks
+        run: |
+          make -j1 ARCH=x86_64 check-native-tests-iris check-shellfree-iris \
+            check-native-tests-postdoc-server check-shellfree-postdoc-server
+      - name: Retain validation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: focused-native-x86_64
+          path: |
+            build/lock/*.lock.json
+            build/x86_64/check/*-native/*.json
+            build/x86_64/check/*-native/*.log
+            build/x86_64/check/*-shellfree.log
+            build/x86_64/check/*-build.log
+          retention-days: 3
