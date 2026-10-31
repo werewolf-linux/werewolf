@@ -984,8 +984,7 @@ pub fn createFirecrackerLocked(
         if (pinned) try firecracker.pin(io, gpa, try gpa.print("{s}/{s}", .{ cwd, dir }), why);
         if (pinned) {
             const images = @import("data-image.zig");
-            var recorded = spec;
-            recorded.ipe_key = null;
+            const recorded = @import("local-secure.zig").scrubLocalSpec(spec);
             const approved = try images.approve(io, gpa, .{
                 .provider = .firecracker,
                 .managed = false,
@@ -1003,7 +1002,7 @@ pub fn createFirecrackerLocked(
             profile.provider = .firecracker;
             profile.spec = recorded;
             profile.spec.ipe_cert = approved.profile.spec.ipe_cert;
-            profile.local = spec;
+            profile.local = recorded;
             const authority = try gpa.print("{s}/authority", .{dir});
             try Dir.cwd().createDirPath(io, authority);
             try Dir.cwd().setFilePermissions(io, authority, .fromMode(0o700), .{});

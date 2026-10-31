@@ -230,7 +230,8 @@ const Test = struct {
             return error.PublishedLiveCapture
         else |err| if (err != error.FileNotFound)
             return err;
-        try t.ssh(source, &.{ "service-down-v1", "postgres" }, "manual-down", true);
+        try t.stopApplications(source, "manual-down");
+        const cloud_provider = cloud.supported(t.on);
         for ([_]bool{ true, false }) |online| {
             if (!online and !cloud_provider) try t.poweroff(source);
             const prefix = if (online) "online" else "offline";
@@ -294,12 +295,12 @@ const Test = struct {
                     false,
                     "restarted-writer-refused",
                 );
-                try t.ssh(source, &.{ "service-down-v1", "postgres" }, "manual-down-again", true);
+                try t.stopApplications(source, "manual-down-again");
             }
         }
         c.say(
-            "pass: real PostgreSQL full/service imports, both source states, shell-free SSH and " ++
-                "stopped destinations",
+            "pass: real PostgreSQL full/service imports, both source states, online SSH and " ++
+                "offline disk destinations",
             .{},
         );
     }
@@ -417,7 +418,8 @@ const Test = struct {
     fn configuration(t: *Test, role: []const u8) ![]const u8 {
         const c = t.c;
         const path = try c.path(try c.gpa.print("config-{s}", .{role}));
-        try Dir.cwd().createDir(c.io, path, .fromMode(0o700));
+        try Dir.cwd().createDirPath(c.io, path);
+        try Dir.cwd().setFilePermissions(c.io, path, .fromMode(0o700), .{});
         try Dir.cwd().copyFile(
             try c.gpa.print("{s}.pub", .{t.key}),
             .cwd(),
@@ -444,7 +446,9 @@ const Test = struct {
 
     fn create(t: *Test, name: []const u8, config: []const u8, label: []const u8) !void {
         const c = t.c;
-        _ = try c.must(
+        var args: std.ArrayList([]const u8) = .empty;
+        try args.appendSlice(
+            c.gpa,
             &.{
                 t.binary,
                 "create",
@@ -460,9 +464,17 @@ const Test = struct {
                 "no",
                 "--yes",
             },
-            label,
-            .{ .timeout = .fromSeconds(1800) },
         );
+        if (t.on == .bhyve) try args.appendSlice(c.gpa, &.{ "--network", "slirp" });
+        if (cloud.supported(t.on)) {
+            try args.appendSlice(c.gpa, &.{ "--allow-from", "me" });
+            if (c.env.get("DATA_TRANSFER_SIZE")) |size| try args.appendSlice(
+                c.gpa,
+                &.{ "--size", size },
+            );
+        }
+        _ = try c.must(args.items, label, .{ .timeout = .fromSeconds(1800) });
+        try t.rememberDisk(name);
         // A successful startup must also preserve the real database invariants.
         _ = try t.consoleUntil(name, "transfer-fixture: ready", 180);
         const console = try t.consoleUntil(name, "posture: fail=", 90);
@@ -483,8 +495,19 @@ const Test = struct {
             .{ try t.instance(name), if (t.on == .lima) "serial.log" else "console.log" },
         );
         for (0..seconds) |_| {
-            const raw = Dir.cwd().readFileAlloc(c.io, file, c.gpa, .limited(4 << 20)) catch "";
-            const text = try host.qemu.clean(c.gpa, raw);
+            const raw = if (cloud.supported(t.on))
+                try t.cloudConsole(name)
+            else
+                Dir.cwd().readFileAlloc(c.io, file, c.gpa, .limited(4 << 20)) catch "";
+            if (cloud.supported(t.on)) try Dir.cwd().writeFile(
+                c.io,
+                .{ .sub_path = file, .data = raw },
+            );
+            const fresh = if (t.boot_markers.get(name)) |marker|
+                @import("azure.zig").since(raw, marker)
+            else
+                raw;
+            const text = try host.qemu.clean(c.gpa, fresh);
             // A serial read can end halfway through a marker or host key.
             if (mem.find(u8, text, needle)) |start| {
                 if (mem.findScalarPos(u8, text, start + needle.len, '\n') != null) return text;
@@ -530,7 +553,7 @@ const Test = struct {
     fn sshRequest(
         t: *Test,
         name: []const u8,
-        kind: enum { command, pty, forward, subsystem },
+        kind: enum { command, pty, forward, subsystem, shutdown },
         command: []const []const u8,
         label: []const u8,
         success: bool,
@@ -574,7 +597,8 @@ const Test = struct {
         try argv.append(c.gpa, try c.gpa.print("root@{s}", .{try t.sshHost(name)}));
         try argv.appendSlice(c.gpa, command);
         const r = try c.run(argv.items, label, .{ .timeout = .fromSeconds(100) });
-        if (r.ok() != success) return c.fail(
+        if (kind != .shutdown and
+            r.ok() != success) return c.fail(
             "{s}: unexpected SSH result: {s}",
             .{ label, r.stderr },
         );
@@ -655,6 +679,27 @@ const Test = struct {
     }
 
     fn running(t: *Test, name: []const u8) !bool {
+        if (t.on == .firecracker) return try @import("firecracker.zig").supervised(
+            t.c.io,
+            t.c.gpa,
+            try t.instance(name),
+        ) or
+            @import("firecracker.zig").running(t.c.io, t.c.gpa, try t.instance(name)) != null;
+        if (cloud.supported(t.on)) {
+            if ((try t.profile(name)).cloud_staged) return false;
+            return (try @import("data-cloud.zig").state(
+                t.c.io,
+                t.c.gpa,
+                name,
+                try t.cloudContext(name),
+            )).running;
+        }
+        if (t.on == .bhyve) return try @import("bhyve.zig").supervised(
+            t.c.io,
+            t.c.gpa,
+            try howl.machineDir(t.c.gpa, name),
+        ) or
+            try @import("bhyve.zig").exists(t.c.io, t.c.gpa, name);
         return if (t.on == .lima)
             lima.running(t.c.io, t.c.gpa, name)
         else
@@ -1032,15 +1077,62 @@ const Test = struct {
     fn poweroff(t: *Test, name: []const u8) !void {
         const c = t.c;
         const at = try t.instance(name);
-        if (t.on == .lima)
-            _ = try host.qmp.command(
+        if (t.on == .firecracker) {
+            try Dir.cwd().writeFile(
                 c.io,
-                c.gpa,
-                try c.gpa.print("{s}/qmp.sock", .{at}),
-                "system_powerdown",
-                null,
-            )
-        else {
+                .{
+                    .sub_path = try c.gpa.print("{s}/stop-request", .{at}),
+                    .data = "",
+                    .flags = .{ .permissions = .fromMode(0o600) },
+                },
+            );
+            try t.ssh(name, &.{ "service-down-v1", "transfer-stop" }, "fixture-stop-arm", true);
+            try c.io.sleep(.fromMilliseconds(300), .awake);
+            try t.sshRequest(
+                name,
+                .shutdown,
+                &.{ "service-up-v1", "transfer-stop" },
+                "fixture-stop",
+                true,
+            );
+        } else if (cloud.supported(t.on)) {
+            try t.cloudPower(name, false, "cloud-poweroff");
+        } else if (t.on == .bhyve) {
+            const root = try @import("bhyve.zig").asRoot(c.io);
+            const found = try c.must(
+                try mem.concat(
+                    c.gpa,
+                    []const u8,
+                    &.{
+                        root,
+                        &.{
+                            "/bin/pgrep",
+                            "-u",
+                            "0",
+                            "-f",
+                            "-x",
+                            try c.gpa.print("bhyve: {s}", .{name}),
+                        },
+                    },
+                ),
+                "bhyve-poweroff-pid",
+                .{},
+            );
+            const pid_text = mem.trim(u8, found.stdout, " \r\n");
+            const pid = try std.fmt.parseUnsigned(u32, pid_text, 10);
+            if (pid <= 1) return error.PoweroffPid;
+            _ = try c.must(
+                try mem.concat(c.gpa, []const u8, &.{ root, &.{ "/bin/kill", "-TERM", pid_text } }),
+                "bhyve-poweroff",
+                .{},
+            );
+        } else if (t.on == .lima) _ = try host.qmp.command(
+            c.io,
+            c.gpa,
+            try c.gpa.print("{s}/qmp.sock", .{at}),
+            "system_powerdown",
+            null,
+        ) else {
             const address = try Io.net.UnixAddress.init(try c.gpa.print("{s}/monitor.sock", .{at}));
             const stream = try address.connect(c.io);
             defer stream.close(c.io);

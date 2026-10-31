@@ -49,6 +49,7 @@ const Unit = struct {
     inode: ?u64 = null,
     installed: bool = false,
     sequence: u64 = 0,
+    entry: ?data.Entry = null,
 };
 const Receipt = struct {
     version: u8 = 2,
@@ -1098,6 +1099,12 @@ test "full compressed import preserves data and machine exclusions and rejects o
     var target = try tmp.dir.openDir(io, "target", .{ .iterate = true });
     defer target.close(io);
     try source.createDirPath(io, "svc/postgres");
+    try source.setFilePermissions(
+        io,
+        "svc/postgres",
+        .fromMode(0o2750),
+        .{ .follow_symlinks = false },
+    );
     try source.createDirPath(io, "home/person/empty");
     try source.createDirPath(io, ".werewolf");
     try source.createDirPath(io, "log");
@@ -1152,6 +1159,12 @@ test "full compressed import preserves data and machine exclusions and rejects o
         "destination audit trail",
         try target.readFileAlloc(io, "log/current", a, .limited(1024)),
     );
+    try tmp.dir.createDir(io, "fresh", .fromMode(0o700));
+    var fresh = try tmp.dir.openDir(io, "fresh", .{ .iterate = true });
+    defer fresh.close(io);
+    var fresh_input: Io.Reader = .fixed(compressed.stdout);
+    _ = try apply(io, a, &fresh_input, fresh, policy, .{ .target = "fresh-machine" });
+    try t.expectError(error.FileNotFound, fresh.access(io, "log", .{}));
     for (manifest.entries) |e| {
         if (data.beneath(e.path, "log")) continue;
         const st = try target.statFile(io, e.path, .{ .follow_symlinks = false });
