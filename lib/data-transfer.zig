@@ -758,9 +758,25 @@ test "inventory cannot authorize machine state, unknown owners or ambiguous path
     m.entries = &.{entry};
     try t.expectError(error.TransferOwner, check(a, m, test_policy, null));
     entry = directory;
+    entry.mode = 0o2750;
+    m.entries = &.{entry};
+    try check(a, m, test_policy, null);
+    entry.mode = 0o2770;
+    m.entries = &.{entry};
+    try check(a, m, test_policy, null);
     entry.mode = 0o4755;
     m.entries = &.{entry};
     try t.expectError(error.TransferMetadata, check(a, m, test_policy, null));
+    for ([_]u32{ 0o4755, 0o2755, 0o1755 }) |bad_file_mode| {
+        var file_entry = directory;
+        file_entry.path = "svc/plex";
+        var sub = file_entry;
+        sub.path = "svc/plex/bin";
+        sub.kind = .file;
+        sub.mode = bad_file_mode;
+        m.entries = &.{ directory, file_entry, sub };
+        try t.expectError(error.TransferMetadata, check(a, m, test_policy, null));
+    }
     m.entries = &.{directory};
     m.excluded = &.{};
     try t.expectError(error.TransferLimit, check(a, m, test_policy, null));

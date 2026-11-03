@@ -509,10 +509,15 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
             "        howl run --with {s}           {f}\n",
             .{ ref, look.dim("boot it here, its console in this terminal") },
         );
-    } else {
+    } else if (o.disabled.eql(.empty)) {
         try e.print(
             "  Next: howl upload {s} --on {s}\n",
             .{ boot, howl.Platform.list(.cloud, "|") },
+        );
+    } else {
+        try e.print(
+            "  Next: howl upload {s} --on {s} --disable={s}\n",
+            .{ boot, howl.Platform.list(.cloud, "|"), howl.every_protection },
         );
     }
     Io.File.stderr().writeStreamingAll(io, err_out.written()) catch {};

@@ -45,10 +45,10 @@ pub const Options = struct {
 };
 const Unit = struct {
     path: []const u8,
-    entry: ?data.Entry = null,
     inode: ?u64 = null,
     installed: bool = false,
     sequence: u64 = 0,
+    entry: ?data.Entry = null,
 };
 const Receipt = struct {
     version: u8 = 2,
@@ -153,7 +153,7 @@ pub const Session = struct {
         p: data.Policy,
         o: Options,
     ) !void {
-        var phase: []const u8 = "validation";
+        var phase: []const u8 = "policy";
         errdefer std.debug.print("data-transfer publication: {s}\n", .{phase});
         if (o.target.len == 0 or o.target.len > 256) return error.TransferTarget;
         try data.check(a, result.manifest, p, o.service);
@@ -811,22 +811,20 @@ fn applyMetadata(io: Io, root: Dir, e: data.Entry, p: data.Policy) !void {
     const st = try file.stat(io);
     if ((e.kind == .file and (st.kind != .file or st.nlink != 1)) or
         (e.kind == .directory and st.kind != .directory)) return error.TransferFileType;
+    phase = "owner";
     const uid = try data.identityByName(p.users, e.owner);
     const gid = try data.identityByName(p.groups, e.group);
-    try file.setOwner(io, uid, gid);
-    if (@import("builtin").os.tag == .linux and e.kind == .directory and e.mode & 0o2000 != 0 and
-        std.os.linux.geteuid() == 0)
-    {
-        const linux = std.os.linux;
-        const old_gid = linux.getegid();
-        const unchanged = std.math.maxInt(linux.gid_t);
-        if (linux.errno(linux.setresgid(unchanged, gid, unchanged)) != .SUCCESS)
-            return error.TransferMetadata;
-        const result = file.setPermissions(io, .fromMode(@intCast(e.mode)));
-        if (linux.errno(linux.setresgid(unchanged, old_gid, unchanged)) != .SUCCESS)
-            return error.TransferMetadata;
-        try result;
-    } else try file.setPermissions(io, .fromMode(@intCast(e.mode)));
+    const setgid_directory = @import("builtin").os.tag == .linux and std.os.linux.geteuid() == 0 and
+        e.kind == .directory and e.mode & 0o2000 != 0;
+    // Linux preserves a directory's setgid bit across chown, but chmod clears
+    // it for a foreign group without FSETID. Set it under our group first.
+    if (setgid_directory)
+        try file.setOwner(io, 0, std.os.linux.getegid())
+    else
+        try file.setOwner(io, uid, gid);
+    phase = "mode";
+    try file.setPermissions(io, .fromMode(@intCast(e.mode)));
+    if (setgid_directory) try file.setOwner(io, uid, gid);
     phase = "ACL";
     if (e.kind == .directory and e.default_acl == null) try data.metadata.clearDefault(file);
     if (e.default_acl) |acl| try data.metadata.setDefault(file, acl);
@@ -1098,6 +1096,12 @@ test "full compressed import preserves data and machine exclusions and rejects o
     var target = try tmp.dir.openDir(io, "target", .{ .iterate = true });
     defer target.close(io);
     try source.createDirPath(io, "svc/postgres");
+    try source.setFilePermissions(
+        io,
+        "svc/postgres",
+        .fromMode(0o2750),
+        .{ .follow_symlinks = false },
+    );
     try source.createDirPath(io, "home/person/empty");
     try source.createDirPath(io, ".werewolf");
     try source.createDirPath(io, "log");
@@ -1152,6 +1156,12 @@ test "full compressed import preserves data and machine exclusions and rejects o
         "destination audit trail",
         try target.readFileAlloc(io, "log/current", a, .limited(1024)),
     );
+    try tmp.dir.createDir(io, "fresh", .fromMode(0o700));
+    var fresh = try tmp.dir.openDir(io, "fresh", .{ .iterate = true });
+    defer fresh.close(io);
+    var fresh_input: Io.Reader = .fixed(compressed.stdout);
+    _ = try apply(io, a, &fresh_input, fresh, policy, .{ .target = "fresh-machine" });
+    try t.expectError(error.FileNotFound, fresh.access(io, "log", .{}));
     for (manifest.entries) |e| {
         if (data.beneath(e.path, "log")) continue;
         const st = try target.statFile(io, e.path, .{ .follow_symlinks = false });

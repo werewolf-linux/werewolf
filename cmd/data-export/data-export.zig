@@ -35,7 +35,7 @@ pub fn main(init: std.process.Init) void {
         var line: [256]u8 = undefined;
         const message = std.mem.print(
             &line,
-            "data-export: {s}: {s}; keep application writers down until export exits\n",
+            "data-export: {s}: {s}; keep application writers down until transfer exits\n",
             .{ phase, @errorName(err) },
         ) catch unreachable;
         File.stderr().writeStreamingAll(init.io, message) catch {};

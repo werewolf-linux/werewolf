@@ -35,8 +35,8 @@ pub fn prepare(
 ) !secure.Profile {
     if (!cloud.supported(on)) return error.TransferProvider;
     const expected = record.disk_sha256 orelse return error.TransferImageCache;
-    const image = std.fmt.bytesToHex(record.verity.root, .lower);
-    const cache = try images.directory(io, a, &image);
+    const fallback = std.fmt.bytesToHex(record.verity.root, .lower);
+    const cache = try images.directory(io, a, record.profile.data_image orelse &fallback);
     const source = try a.print("{s}/disk.raw", .{cache});
     if (!std.mem.eql(
         u8,
